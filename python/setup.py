@@ -25,11 +25,11 @@ from shutil import copy2, rmtree
 from grpc_tools.command import build_package_protos
 from setuptools import find_packages, setup, Command
 
-package_name = os.getenv("RAYDP_PACKAGE_NAME", "raydp")
+package_name = os.getenv("RAYDP_PACKAGE_NAME", "raydp-samsara")
 if package_name == 'raydp_nightly':
     VERSION = datetime.today().strftime("%Y.%m.%d.dev1")
 else:
-    VERSION = "0.5.0-samsara"
+    VERSION = "0.5.0"
 
 ROOT_DIR = os.path.dirname(__file__)
 
