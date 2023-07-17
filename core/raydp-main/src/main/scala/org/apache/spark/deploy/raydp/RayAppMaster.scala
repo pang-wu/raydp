@@ -271,7 +271,8 @@ class RayAppMaster(host: String,
         memory,
         // This won't work, Spark expect integer in custom resources,
         // please see python test test_spark_on_fractional_custom_resource
-        appInfo.desc.resourceReqsPerExecutor.map{ case (name, amount) => (name, Double.box(amount))}.asJava,
+        appInfo.desc.resourceReqsPerExecutor
+          .map{ case (name, amount) => (name, Double.box(amount))}.asJava,
         placementGroup,
         getNextBundleIndex,
         seqAsJavaList(appInfo.desc.command.javaOpts))
