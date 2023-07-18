@@ -39,7 +39,7 @@ def test_spark(spark_on_ray_small):
     assert result == 10
 
 
-def test_spark_on_fractional_cpu():
+def test_legacy_spark_on_fractional_cpu():
     cluster = Cluster(
         initialize_head=True,
         connect=True,
@@ -50,6 +50,27 @@ def test_spark_on_fractional_cpu():
     spark = raydp.init_spark(app_name="test_cpu_fraction",
                              num_executors=1, executor_cores=3, executor_memory="500M",
                              configs={"spark.ray.actor.resource.cpu": "0.1"})
+    result = spark.range(0, 10).count()
+    assert result == 10
+
+    spark.stop()
+    raydp.stop_spark()
+    time.sleep(5)
+    ray.shutdown()
+    cluster.shutdown()
+
+
+def test_spark_on_fractional_cpu():
+    cluster = Cluster(
+        initialize_head=True,
+        connect=True,
+        head_node_args={
+            "num_cpus": 2
+        })
+
+    spark = raydp.init_spark(app_name="test_cpu_fraction",
+                             num_executors=1, executor_cores=3, executor_memory="500M",
+                             configs={"spark.ray.raydp_spark_executor.actor.resource.cpu": "0.1"})
     result = spark.range(0, 10).count()
     assert result == 10
 
@@ -71,7 +92,7 @@ def test_spark_executor_node_affinity():
 
     spark = raydp.init_spark(app_name="test_executor_node_affinity",
                              num_executors=1, executor_cores=2, executor_memory="500M",
-                             configs={"spark.ray.actor.resource.spark_executor": "1"})
+                             configs={"spark.ray.raydp_spark_executor.actor.resource.spark_executor": "1"})
     result = spark.range(0, 10).count()
     assert result == 10
 
