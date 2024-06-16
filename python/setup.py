@@ -95,7 +95,7 @@ try:
     copy2(SCRIPT_PATH, SCRIPT_TARGET)
 
     install_requires = [
-        "numpy",
+        "numpy < 2.0.0",
         "pandas >= 1.1.4",
         "psutil",
         "pyarrow >= 4.0.1, <15.0.0",
