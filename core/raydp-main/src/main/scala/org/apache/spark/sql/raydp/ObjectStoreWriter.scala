@@ -24,7 +24,6 @@ import java.util.{List, UUID}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
 import java.util.function.{Function => JFunction}
 import org.apache.arrow.vector.types.pojo.Schema
-import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import org.apache.spark.{RayDPException, SparkContext}
