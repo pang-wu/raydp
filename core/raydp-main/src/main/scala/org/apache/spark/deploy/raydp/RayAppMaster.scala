@@ -21,20 +21,24 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.{Date, Locale}
 import javax.xml.bind.DatatypeConverter
-import scala.jdk.CollectionConverters._
+
 import scala.collection.mutable.HashMap
+import scala.jdk.CollectionConverters._
+
+import com.fasterxml.jackson.core.JsonFactory
+import com.fasterxml.jackson.databind.ObjectMapper
+
 import io.ray.api.{ActorHandle, PlacementGroups, Ray}
 import io.ray.api.id.PlacementGroupId
 import io.ray.api.placementgroup.PlacementGroup
 import io.ray.runtime.config.RayConfig
+
 import org.apache.spark.{RayDPException, SecurityManager, SparkConf}
 import org.apache.spark.executor.RayDPExecutor
 import org.apache.spark.internal.Logging
 import org.apache.spark.raydp.{RayExecutorUtils, SparkOnRayConfigs}
 import org.apache.spark.rpc._
 import org.apache.spark.util.Utils
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.core.JsonFactory
 
 
 class RayAppMaster(host: String,
@@ -362,7 +366,7 @@ object RayAppMaster extends Serializable {
       // Convert all values to strings since System.setProperty expects String
       System.setProperty(key, value.toString)
     }
-    
+
     // Use the same session dir as the python side
     RayConfig.create().setSessionDir(System.getProperty("ray.session-dir"))
   }
