@@ -97,7 +97,7 @@ object ObjectStoreWriter {
   def toArrowSchema(df: DataFrame): Schema = {
     val conf = df.queryExecution.sparkSession.sessionState.conf
     val timeZoneId = conf.getConf(SQLConf.SESSION_LOCAL_TIMEZONE)
-    SparkShimLoader.getSparkShims.toArrowSchema(df.schema, timeZoneId)
+    SparkShimLoader.getSparkShims.toArrowSchema(df.schema, timeZoneId, df.sparkSession)
   }
 
   @deprecated
@@ -108,7 +108,7 @@ object ObjectStoreWriter {
     }
     val uuid = dfToId.getOrElseUpdate(df, UUID.randomUUID())
     val queue = ObjectRefHolder.getQueue(uuid)
-    val rdd = df.toArrowBatchRdd
+    val rdd = SparkShimLoader.getSparkShims.toArrowBatchRDD(df)
     rdd.persist(storageLevel)
     rdd.count()
     var executorIds = df.sqlContext.sparkContext.getExecutorIds.toArray
