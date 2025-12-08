@@ -24,6 +24,7 @@ import java.util.{List, UUID}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
 import java.util.function.{Function => JFunction}
 import org.apache.arrow.vector.types.pojo.Schema
+import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import org.apache.spark.{RayDPException, SparkContext}
@@ -168,7 +169,7 @@ object ObjectStoreWriter {
         "Not yet connected to Ray! Please set fault_tolerant_mode=True when starting RayDP.")
     }
 
-    val rdd = df.toArrowBatchRdd
+    val rdd = SparkShimLoader.getSparkShims.toArrowBatchRDD(df)
     rdd.persist(storageLevel)
     rdd.count()
     // Keep a strong reference so Spark's ContextCleaner does not GC the cached blocks
