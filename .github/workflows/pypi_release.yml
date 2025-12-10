@@ -34,6 +34,9 @@ jobs:
     if: ${{ github.repository_owner == 'ray-project' }}
     name: build wheel and upload release
     runs-on: ubuntu-latest
+    env:
+      PYSPARK_VERSION: "3.5.7"
+      RAY_VERSION: "2.40.0"
     steps:
     - uses: actions/checkout@61b9e3751b92087fd0b06925ba6dd6314e06f089 # master
       with:
@@ -47,8 +50,58 @@ jobs:
       uses: actions/setup-java@b6e674f4b717d7b0ae3baee0fbe79f498905dfde # v1.4.4
       with:
         java-version: 1.8
-    - name: Build wheel
-      run: pip install wheel grpcio-tools && ./build.sh
+    - name: Install extra dependencies for Ubuntu
+      run: |
+        sudo apt-get install -y mpich
+    - name: Cache pip
+      uses: actions/cache@8492260343ad570701412c2f464a5877dc76bace # v2
+      with:
+        path: ~/.cache/pip
+        key: ubuntu-latest-3.10.14-pip
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install wheel
+        pip install "numpy<1.24" "click<8.3.0"
+        pip install "pydantic<2.0"
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        pip install pyarrow "ray[train,default]==${{ env.RAY_VERSION }}" tqdm pytest tensorflow==2.13.1 tabulate grpcio-tools wget
+        pip install "xgboost_ray[default]<=0.1.13"
+        pip install "xgboost<=2.0.3"
+        pip install torchmetrics
+    - name: Cache Maven
+      uses: actions/cache@8492260343ad570701412c2f464a5877dc76bace # v2
+      with:
+        path: ~/.m2
+        key: ubuntu-latest-m2-${{ hashFiles('core/pom.xml') }}
+    - name: Build and install
+      env:
+        GITHUB_CI: 1
+      run: |
+        pip install pyspark==${{ env.PYSPARK_VERSION }}
+        ./build.sh
+        pip install dist/raydp-*.whl
+    - name: Lint
+      run: |
+        pip install pylint==2.8.3
+        pylint --rcfile=python/pylintrc python/raydp
+        pylint --rcfile=python/pylintrc examples/*.py
+    - name: Test with pytest
+      run: |
+        ray start --head --num-cpus 6
+        pytest python/raydp/tests/ -v
+        ray stop --force
+    - name: Test Examples
+      run: |
+        ray start --head
+        python examples/raydp-submit.py
+        python examples/test_raydp_submit_pyfiles.py
+        ray stop
+        python examples/pytorch_nyctaxi.py
+        python examples/tensorflow_nyctaxi.py
+        python examples/xgboost_ray_nyctaxi.py
+        # python examples/raytrain_nyctaxi.py
+        python examples/data_process.py
     - name: Upload to PyPI
       uses: pypa/gh-action-pypi-publish@v1.13.0
       with:
