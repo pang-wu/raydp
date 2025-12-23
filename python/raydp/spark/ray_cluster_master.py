@@ -224,6 +224,18 @@ class RayDPSparkMaster():
     def add_objects(self, timestamp, objects):
         self._objects[timestamp] = objects
 
+    def adopt_objects(self, timestamp, objects):
+        """Adopt objects by re-putting them inside this actor.
+
+        This makes this actor the owner of the newly created objects without
+        using the Ray.put `_owner` argument.
+
+        Returns the new ObjectRefs.
+        """
+        new_objects = [ray.put(ray.get(obj)) for obj in objects]
+        self._objects[timestamp] = new_objects
+        return new_objects
+
     def get_object(self, timestamp, idx):
         return self._objects[timestamp][idx]
 

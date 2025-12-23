@@ -15,7 +15,7 @@
 # limitations under the License.
 import logging
 import uuid
-from typing import Callable, Dict, List, NoReturn, Optional, Iterable, Union
+from typing import Callable, List, Optional, Union
 from dataclasses import dataclass
 
 import pandas as pd
@@ -103,7 +103,9 @@ def get_raydp_master_owner(spark: Optional[SparkSession] = None) -> PartitionObj
     def raydp_master_set_reference_as_state(
             raydp_master_actor: ray.actor.ActorHandle,
             objects: List[ObjectRef]) -> ObjectRef:
-        return raydp_master_actor.add_objects.remote(uuid.uuid4(), objects)
+        # Adopt objects in the Python master actor so it becomes the owner of the
+        # dataset blocks without using Ray.put `_owner`.
+        return raydp_master_actor.adopt_objects.remote(uuid.uuid4(), objects)
 
     return PartitionObjectsOwner(
         obj_holder_name,
@@ -141,7 +143,10 @@ def _save_spark_df_to_object_store(df: sql.DataFrame, use_batch: bool = True,
 
     if owner is not None:
         actor_owner = ray.get_actor(actor_owner_name)
-        ray.get(owner.set_reference_as_state(actor_owner, blocks))
+        adopted = ray.get(owner.set_reference_as_state(actor_owner, blocks))
+        # If the owner callback returns a new list of refs (adoption), use it.
+        if adopted is not None:
+            blocks = adopted
 
     return blocks, block_sizes
 

@@ -11,6 +11,16 @@ public class SparkOnRayConfigs {
             "spark.ray.raydp_spark_master.actor.resource";
 
     /**
+     * Concurrency (max parallelism) for data owner transfer operations, i.e.
+     * how many concurrent putDatasetBlock calls RayAppMaster can handle.
+     *
+     * Example usage:
+     * spark.ray.raydp_spark_master.actor.owner_transfer_concurrency=4
+     */
+    public static final String SPARK_MASTER_OWNER_TRANSFER_CONCURRENCY =
+            "spark.ray.raydp_spark_master.actor.owner_transfer_concurrency";
+
+    /**
      * Extra JVM options for the RayDP AppMaster actor and gateway process.
      * This is useful for passing JDK 17+ --add-opens flags.
      * Example: "--add-opens=java.base/java.lang=ALL-UNNAMED ..."

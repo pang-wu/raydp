@@ -18,10 +18,10 @@
 package org.apache.spark.sql.raydp
 
 import com.intel.raydp.shims.SparkShimLoader
-import io.ray.api.{ActorHandle, ObjectRef, PyActorHandle, Ray}
+import io.ray.api.{ActorHandle, ObjectRef, Ray}
 import io.ray.runtime.AbstractRayRuntime
 import java.io.ByteArrayOutputStream
-import java.util.{List, UUID}
+import java.util.{List, Optional, UUID}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
 import java.util.function.{Function => JFunction}
 import org.apache.arrow.vector.VectorSchemaRoot
@@ -64,13 +64,13 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
       queue: ObjectRefHolder.Queue,
       ownerName: String): RecordBatch = {
 
-    var objectRef: ObjectRef[Array[Byte]] = null
-    if (ownerName == "") {
-      objectRef = Ray.put(data)
-    } else {
-      var dataOwner: PyActorHandle = Ray.getActor(ownerName).get()
-      objectRef = Ray.put(data, dataOwner)
-    }
+    // NOTE: We intentionally do NOT pass an owner argument to Ray.put anymore.
+    // The default JVM path puts the serialized Arrow batch into Ray's object store
+    // from the Spark executor JVM process.
+    //
+    // Ownership transfer to a long-lived Python actor is implemented on the Python side
+    // by "adopting" (re-putting) these ObjectRefs inside the target actor.
+    val objectRef: ObjectRef[Array[Byte]] = Ray.put(data)
 
     // add the objectRef to the objectRefHolder to avoid reference GC
     queue.add(objectRef)
