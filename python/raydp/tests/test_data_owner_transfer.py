@@ -12,6 +12,7 @@ import raydp
 from raydp.spark import PartitionObjectsOwner
 from pyspark.sql import SparkSession
 from raydp.spark import get_raydp_master_owner
+from raydp.spark.ray_cluster_master import RayDPObjectOwnerMixin
 
 
 def gen_test_data(spark_session: SparkSession):
@@ -145,7 +146,7 @@ def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_c
   """
 
   @ray.remote
-  class CustomActor:
+  class CustomActor(RayDPObjectOwnerMixin):
       objects: Any
 
       def wake(self):
@@ -153,11 +154,6 @@ def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_c
 
       def set_objects(self, objects):
           self.objects = objects
-
-      def adopt_objects(self, objects):
-          # Re-put inside this actor so this actor becomes the owner of the new objects.
-          self.objects = [ray.put(ray.get(o)) for o in objects]
-          return self.objects
 
   if ray_client.ray.is_connected():
       pytest.skip("Skip this test if using ray client")
@@ -190,7 +186,7 @@ def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_c
   # and transfer data ownership to dedicated Object Holder (Singleton)
   ds = spark_dataframe_to_ray_dataset(df_train, parallelism=4, owner=PartitionObjectsOwner(
       owner_actor_name,
-      lambda actor, objects: actor.adopt_objects.remote(objects)))
+      lambda actor, objects: actor.set_objects.remote(objects)))
 
   # display data
   ds.show(5)

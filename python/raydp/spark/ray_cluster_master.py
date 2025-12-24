@@ -29,6 +29,7 @@ import glob
 import ray
 from py4j.java_gateway import JavaGateway, GatewayParameters
 from raydp import versions
+import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,25 @@ RAY_PREFER_CLASSPATH = "spark.ray.preferClassPath"
 SPARK_LOG4J_CONFIG_FILE_NAME = "spark.log4j.config.file.name"
 RAY_LOG4J_CONFIG_FILE_NAME = "spark.ray.log4j.config.file.name"
 
+class RayDPObjectOwnerMixin:
+    """Mixin for Python actors that can be used as dataset block owners.
+
+    The JVM side can invoke the actor method `put_data` via Ray's cross-language
+    actor call support so that this Python actor becomes the owner of the created
+    objects, without using Ray's experimental `ray.put(_owner=...)` API.
+    """
+
+    def put_data(self, data) -> "pa.Table":
+        """Put one serialized Arrow batch into the Ray object store."""
+        # data is Arrow IPC stream bytes written by ArrowStreamWriter
+        reader = pa.ipc.open_stream(pa.BufferReader(data))
+        table = reader.read_all()
+        return table
+
 
 
 @ray.remote
-class RayDPSparkMaster():
+class RayDPSparkMaster(RayDPObjectOwnerMixin):
     def __init__(self, configs):
         self._gateway = None
         self._app_master_java_bridge = None
@@ -223,18 +239,6 @@ class RayDPSparkMaster():
 
     def add_objects(self, timestamp, objects):
         self._objects[timestamp] = objects
-
-    def adopt_objects(self, timestamp, objects):
-        """Adopt objects by re-putting them inside this actor.
-
-        This makes this actor the owner of the newly created objects without
-        using the Ray.put `_owner` argument.
-
-        Returns the new ObjectRefs.
-        """
-        new_objects = [ray.put(ray.get(obj)) for obj in objects]
-        self._objects[timestamp] = new_objects
-        return new_objects
 
     def get_object(self, timestamp, idx):
         return self._objects[timestamp][idx]

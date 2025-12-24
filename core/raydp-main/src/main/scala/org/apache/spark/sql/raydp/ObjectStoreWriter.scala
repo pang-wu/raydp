@@ -19,6 +19,9 @@ package org.apache.spark.sql.raydp
 
 import com.intel.raydp.shims.SparkShimLoader
 import io.ray.api.{ActorHandle, ObjectRef, Ray}
+import io.ray.api.PyActorHandle
+import io.ray.api.call.PyActorTaskCaller
+import io.ray.api.function.PyActorMethod
 import io.ray.runtime.AbstractRayRuntime
 import java.io.ByteArrayOutputStream
 import java.util.{List, Optional, UUID}
@@ -65,12 +68,33 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
       ownerName: String): RecordBatch = {
 
     // NOTE: We intentionally do NOT pass an owner argument to Ray.put anymore.
-    // The default JVM path puts the serialized Arrow batch into Ray's object store
-    // from the Spark executor JVM process.
     //
-    // Ownership transfer to a long-lived Python actor is implemented on the Python side
-    // by "adopting" (re-putting) these ObjectRefs inside the target actor.
-    val objectRef: ObjectRef[Array[Byte]] = Ray.put(data)
+    // - When ownerName is empty, route the put via the JVM RayAppMaster actor.
+    // - When ownerName is set to a Python actor name (e.g. RayDPSparkMaster),
+    //   invoke that Python actor's put_data(data) method via Ray cross-language
+    //   calls so that the Python actor becomes the owner of the created object.
+    val objectRef: ObjectRef[_] =
+      if (ownerName == "") {
+        Ray.put(data)
+      } else {
+        // Ray.getActor(String) is a raw Java Optional in Ray's Java API.
+        // If we don't cast it to an explicit reference type here, Scala may infer
+        // Optional[Nothing] and insert an invalid cast at runtime.
+        val opt = Ray.getActor(ownerName).asInstanceOf[Optional[AnyRef]]
+        if (!opt.isPresent) {
+          throw new RayDPException(s"Actor $ownerName not found when putting dataset block.")
+        }
+        val handleAny: AnyRef = opt.get()
+        if (!handleAny.isInstanceOf[PyActorHandle]) {
+          throw new RayDPException(
+            s"Actor $ownerName is not a Python actor; cannot invoke put_data."
+          )
+        }
+        val pyHandle = handleAny.asInstanceOf[PyActorHandle]
+        val method = PyActorMethod.of("put_data", classOf[AnyRef])
+        val refOfRef = pyHandle.task(method, data).remote()
+        refOfRef
+      }
 
     // add the objectRef to the objectRefHolder to avoid reference GC
     queue.add(objectRef)
@@ -171,7 +195,7 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
   /**
    * For test.
    */
-  def getRandomRef(): List[Array[Byte]] = {
+  def getRandomRef(): List[_] = {
 
     df.queryExecution.toRdd.mapPartitions { _ =>
       Iterator(ObjectRefHolder.getRandom(uuid))
@@ -270,7 +294,7 @@ object ObjectStoreWriter {
 }
 
 object ObjectRefHolder {
-  type Queue = ConcurrentLinkedQueue[ObjectRef[Array[Byte]]]
+  type Queue = ConcurrentLinkedQueue[ObjectRef[_]]
   private val dfToQueue = new ConcurrentHashMap[UUID, Queue]()
 
   def getQueue(df: UUID): Queue = {
@@ -295,7 +319,7 @@ object ObjectRefHolder {
     queue.size()
   }
 
-  def getRandom(df: UUID): Array[Byte] = {
+  def getRandom(df: UUID): Any = {
     val queue = checkQueueExists(df)
     val ref = RayDPUtils.convert(queue.peek())
     ref.get()
