@@ -213,7 +213,7 @@ def test_api_compatibility(ray_cluster, jdk17_extra_spark_configs):
   num_executor = 1
 
   spark = raydp.init_spark(
-    app_name = "example",
+    app_name = "test_api_compatibility",
     num_executors = num_executor,
     executor_cores = 1,
     executor_memory = "500M",
@@ -227,7 +227,8 @@ def test_api_compatibility(ray_cluster, jdk17_extra_spark_configs):
 
   # check compatibility of ray 1.9.0 API: no data onwership transfer
   ds = ray.data.from_spark(df_train)
-  ds.show(1)
+  if not ray_client.ray.is_connected():
+    ds.show(1)
   ray_gc() # ensure GC kicked in
   time.sleep(3)
 
