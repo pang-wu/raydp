@@ -67,42 +67,35 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
       queue: ObjectRefHolder.Queue,
       ownerName: String): RecordBatch = {
 
-    // NOTE: We intentionally do NOT pass an owner argument to Ray.put anymore.
-    //
-    // - When ownerName is empty, route the put via the JVM RayAppMaster actor.
-    // - When ownerName is set to a Python actor name (e.g. RayDPSparkMaster),
-    //   invoke that Python actor's put_data(data) method via Ray cross-language
-    //   calls so that the Python actor becomes the owner of the created object.
-    val objectRef: ObjectRef[_] =
-      if (ownerName == "") {
-        Ray.put(data)
-      } else {
-        // Ray.getActor(String) is a raw Java Optional in Ray's Java API.
-        // If we don't cast it to an explicit reference type here, Scala may infer
-        // Optional[Nothing] and insert an invalid cast at runtime.
-        val opt = Ray.getActor(ownerName).asInstanceOf[Optional[AnyRef]]
-        if (!opt.isPresent) {
-          throw new RayDPException(s"Actor $ownerName not found when putting dataset block.")
-        }
-        val handleAny: AnyRef = opt.get()
-        if (!handleAny.isInstanceOf[PyActorHandle]) {
-          throw new RayDPException(
-            s"Actor $ownerName is not a Python actor; cannot invoke put_data."
-          )
-        }
-        val pyHandle = handleAny.asInstanceOf[PyActorHandle]
-        val method = PyActorMethod.of("put_data", classOf[AnyRef])
-        val refOfRef = pyHandle.task(method, data).remote()
-        refOfRef
-      }
+    // Owner-transfer only implementation:
+    // - ownerName must always be provided (non-empty) and refer to a Python actor.
+    // - JVM never creates/handles Ray ObjectRefs for the dataset blocks.
+    // - JVM returns only a per-batch key encoded in RecordBatch.objectId (bytes),
+    //   and Python will fetch the real ObjectRefs from the owner actor by key.
 
-    // add the objectRef to the objectRefHolder to avoid reference GC
-    queue.add(objectRef)
-    val objectRefImpl = RayDPUtils.convert(objectRef)
-    val objectId = objectRefImpl.getId
-    val runtime = Ray.internal.asInstanceOf[AbstractRayRuntime]
-    val addressInfo = runtime.getObjectStore.getOwnershipInfo(objectId)
-    RecordBatch(addressInfo, objectId.getBytes, numRecords)
+    if (ownerName == null || ownerName.isEmpty) {
+      throw new RayDPException("ownerName must be set for Spark->Ray conversion.")
+    }
+
+    val opt = Ray.getActor(ownerName).asInstanceOf[Optional[AnyRef]]
+    if (!opt.isPresent) {
+      throw new RayDPException(s"Actor $ownerName not found when putting dataset block.")
+    }
+    val handleAny: AnyRef = opt.get()
+    if (!handleAny.isInstanceOf[PyActorHandle]) {
+      throw new RayDPException(s"Actor $ownerName is not a Python actor; cannot invoke put_data.")
+    }
+    val pyHandle = handleAny.asInstanceOf[PyActorHandle]
+    val batchKey = UUID.randomUUID().toString
+
+    // put_data(batchKey, arrowBytes) -> boolean ack
+    val method = PyActorMethod.of("put_data", classOf[java.lang.Boolean])
+    val args: Array[AnyRef] = Array(batchKey, data.asInstanceOf[AnyRef])
+    new PyActorTaskCaller(pyHandle, method, args).remote().get()
+
+    // ownerAddress/objectId here are not Ray's object metadata; objectId encodes the key.
+    // Python side will treat objectId as UTF-8 key bytes.
+    RecordBatch(Array.emptyByteArray, batchKey.getBytes("UTF-8"), numRecords)
   }
 
   /**

@@ -110,39 +110,26 @@ def get_raydp_master_owner(spark: Optional[SparkSession] = None) -> PartitionObj
         raydp_master_set_reference_as_state)
 
 
-@client_mode_wrap
-def _register_objects(records):
-    worker = ray.worker.global_worker
-    blocks: List[ray.ObjectRef] = []
-    block_sizes: List[int] = []
-    for obj_id, owner, num_record in records:
-        object_ref = ray.ObjectRef(obj_id)
-        # Register the ownership of the ObjectRef
-        worker.core_worker.deserialize_and_register_object_ref(
-            object_ref.binary(), ray.ObjectRef.nil(), owner, "")
-        blocks.append(object_ref)
-        block_sizes.append(num_record)
-    return blocks, block_sizes
-
 def _save_spark_df_to_object_store(df: sql.DataFrame, use_batch: bool = True,
                                    owner: Union[PartitionObjectsOwner, None] = None):
     # call java function from python
     jvm = df.sql_ctx.sparkSession.sparkContext._jvm
     jdf = df._jdf
     object_store_writer = jvm.org.apache.spark.sql.raydp.ObjectStoreWriter(jdf)
-    actor_owner_name = ""
-    if owner is not None:
-        actor_owner_name = owner.actor_name
+    if owner is None:
+        # Default to RayDPSparkMaster as the owner if not specified.
+        owner = get_raydp_master_owner(df.sql_ctx.sparkSession)
+    actor_owner_name = owner.actor_name
     records = object_store_writer.save(use_batch, actor_owner_name)
 
-    record_tuples = [(record.objectId(), record.ownerAddress(), record.numRecords())
-                     for record in records]
-    blocks, block_sizes = _register_objects(record_tuples)
-
-    if owner is not None:
-        actor_owner = ray.get_actor(actor_owner_name)
-        ray.get(owner.set_reference_as_state(actor_owner, blocks))
-
+    # Owner-transfer-only path:
+    # JVM returns List[RecordBatch] where record.objectId() contains UTF-8 bytes of batch_key.
+    # Fetch actual ObjectRefs from the owner actor by key.
+    data_owner_actor = ray.get_actor(actor_owner_name)
+    batch_keys = [bytes(record.objectId()).decode("utf-8") for record in records]
+    block_sizes = [record.numRecords() for record in records]
+    blocks = ray.get(data_owner_actor.get_block_refs.remote(batch_keys))
+    ray.get(owner.set_reference_as_state(data_owner_actor, blocks))
     return blocks, block_sizes
 
 def spark_dataframe_to_ray_dataset(df: sql.DataFrame,
