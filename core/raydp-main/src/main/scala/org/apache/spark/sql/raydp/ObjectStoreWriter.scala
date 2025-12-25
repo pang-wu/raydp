@@ -20,9 +20,9 @@ package org.apache.spark.sql.raydp
 import com.intel.raydp.shims.SparkShimLoader
 import io.ray.api.{ActorHandle, ObjectRef, Ray}
 import io.ray.api.PyActorHandle
-import io.ray.api.call.PyActorTaskCaller
 import io.ray.api.function.PyActorMethod
 import io.ray.runtime.AbstractRayRuntime
+import io.ray.runtime.config.RayConfig
 import java.io.ByteArrayOutputStream
 import java.util.{List, Optional, UUID}
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
@@ -34,10 +34,12 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.{RayDPException, SparkContext}
+import org.apache.spark.{RayDPException, SparkContext, SparkEnv}
 import org.apache.spark.deploy.raydp._
 import org.apache.spark.executor.RayDPExecutor
+import org.apache.spark.network.util.JavaUtils
 import org.apache.spark.raydp.{RayDPUtils, RayExecutorUtils}
+import org.apache.spark.raydp.SparkOnRayConfigs
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.execution.arrow.ArrowWriter
 import org.apache.spark.sql.execution.python.BatchIterator
@@ -77,25 +79,62 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
       throw new RayDPException("ownerName must be set for Spark->Ray conversion.")
     }
 
-    val opt = Ray.getActor(ownerName).asInstanceOf[Optional[AnyRef]]
-    if (!opt.isPresent) {
-      throw new RayDPException(s"Actor $ownerName not found when putting dataset block.")
+    val registryActorOptional = Ray.getActor(ownerName).asInstanceOf[Optional[AnyRef]]
+    if (!registryActorOptional.isPresent) {
+      throw new RayDPException(s"Blobstore registry actor $ownerName not found.")
     }
-    val handleAny: AnyRef = opt.get()
-    if (!handleAny.isInstanceOf[PyActorHandle]) {
-      throw new RayDPException(s"Actor $ownerName is not a Python actor; cannot invoke put_data.")
+    val registryActorHandle: AnyRef = registryActorOptional.get()
+    if (!registryActorHandle.isInstanceOf[PyActorHandle]) {
+      throw new RayDPException(
+        s"Blobstore registry actor $ownerName is not a Python actor.")
     }
-    val pyHandle = handleAny.asInstanceOf[PyActorHandle]
+
+    val appName = SparkEnv.get.conf.get("spark.app.name", "raydp")
+    val blockStoreActorName =
+      ObjectStoreWriter.getBlockStoreActorName(appName, SparkEnv.get.executorId)
+    val pyHandle = registryActorHandle.asInstanceOf[PyActorHandle]
+    val getActorMethod = PyActorMethod.of(
+      "get_or_create_blockstore_actor", classOf[java.lang.Boolean])
+
+    // Get config inside to retain backward compatibility since this is a public API.
+    val nodeIp = RayConfig.create().nodeIp
+    val cpuOpt =
+      SparkEnv.get.conf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_RESOURCE_CPU)
+    val memOpt =
+      SparkEnv.get.conf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_RESOURCE_MEMORY)
+    val nodeAffinityOpt =
+      SparkEnv.get.conf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_NODE_AFFINITY_RESOURCE)
+    val numCpus = cpuOpt.map(_.toDouble).getOrElse(0.0)
+    val memory = memOpt.map(ObjectStoreWriter.parseMemoryBytes).getOrElse(0.0)
+    val nodeAffinity = nodeAffinityOpt.map(_.toDouble).getOrElse(0.001)
+
+    pyHandle
+      .task(
+        getActorMethod,
+        blockStoreActorName,
+        nodeIp,
+        Double.box(numCpus),
+        Double.box(memory),
+        Double.box(nodeAffinity))
+      .remote()
+      .get()
+    val blockStorageActorHandleOpt =
+      Ray.getActor(blockStoreActorName).asInstanceOf[Optional[PyActorHandle]]
+    if (!blockStorageActorHandleOpt.isPresent) {
+      throw new RayDPException(s"Actor $blockStoreActorName not found when putting dataset block.")
+    }
+    val blockStorageActorHandle = blockStorageActorHandleOpt.get()
+
     val batchKey = UUID.randomUUID().toString
 
-    // put_data(batchKey, arrowBytes) -> boolean ack
-    val method = PyActorMethod.of("put_data", classOf[java.lang.Boolean])
-    val args: Array[AnyRef] = Array(batchKey, data.asInstanceOf[AnyRef])
-    new PyActorTaskCaller(pyHandle, method, args).remote().get()
+    // put_arrow_ipc(batchKey, arrowBytes) -> boolean ack
+    val putArrowIPCMethod = PyActorMethod.of("put_arrow_ipc", classOf[java.lang.Boolean])
+    blockStorageActorHandle.task(putArrowIPCMethod, batchKey, data).remote().get()
 
-    // ownerAddress/objectId here are not Ray's object metadata; objectId encodes the key.
-    // Python side will treat objectId as UTF-8 key bytes.
-    RecordBatch(Array.emptyByteArray, batchKey.getBytes("UTF-8"), numRecords)
+    // RecordBatch payload is an application-level locator (not Ray object metadata):
+    // - ownerAddress encodes the BlockStore actor name (UTF-8)
+    // - objectId encodes the batch key (UTF-8)
+    RecordBatch(blockStoreActorName.getBytes("UTF-8"), batchKey.getBytes("UTF-8"), numRecords)
   }
 
   /**
@@ -218,6 +257,29 @@ object ObjectStoreWriter {
     }
   }
 
+  private def parseMemoryBytes(value: String): Double = {
+    if (value == null || value.isEmpty) {
+      0.0
+    } else {
+      // Spark parser supports both plain numbers (bytes) and strings like "100M", "2g".
+      JavaUtils.byteStringAsBytes(value).toDouble
+    }
+  }
+
+  private def sanitizeActorName(name: String): String = {
+    if (name == null || name.isEmpty) {
+      "raydp"
+    } else {
+      // Ray named actor names should be reasonably simple; normalize to [A-Za-z0-9_].
+      name.replaceAll("[^A-Za-z0-9_]", "_")
+    }
+  }
+
+  private[spark] def getBlockStoreActorName(appName: String, executorId: String): String = {
+    val safeAppName = sanitizeActorName(appName)
+    s"${safeAppName}_BLOCKSTORE_${executorId}"
+  }
+
   def getAddress(): Array[Byte] = {
     if (address == null) {
       val objectRef = Ray.put(1)
@@ -235,6 +297,7 @@ object ObjectStoreWriter {
     SparkShimLoader.getSparkShims.toArrowSchema(df.schema, timeZoneId)
   }
 
+  @deprecated
   def fromSparkRDD(df: DataFrame, storageLevel: StorageLevel): Array[Array[Byte]] = {
     if (!Ray.isInitialized) {
       throw new RayDPException(
@@ -282,6 +345,97 @@ object ObjectStoreWriter {
       results(i) = RayDPUtils.convert(refs(i)).getId.getBytes
     }
     results
+  }
+
+  /**
+   * Recoverable Spark->Ray Dataset conversion without Ray private APIs:
+   * persist Arrow batches in Spark, then push cached partitions into Python BlockStore actors
+   * (owned by Python) via the given registry actor.
+   *
+   * This returns application-level locators in RecordBatch:
+   * - ownerAddress: UTF-8 BlockStore actor name
+   * - objectId: UTF-8 batch key
+   */
+  def fromSparkRDDToBlockStore(
+      df: DataFrame,
+      storageLevel: StorageLevel,
+      registryActorName: String): List[RecordBatch] = {
+    if (!Ray.isInitialized) {
+      throw new RayDPException(
+        "Not yet connected to Ray! Please set fault_tolerant_mode=True when starting RayDP.")
+    }
+    if (registryActorName == null || registryActorName.isEmpty) {
+      throw new RayDPException("registryActorName must be set for recoverable conversion.")
+    }
+
+    val rdd = df.toArrowBatchRdd
+    rdd.persist(storageLevel)
+    rdd.count()
+
+    val executorIds = df.sqlContext.sparkContext.getExecutorIds.toArray
+    val numExecutors = executorIds.length
+    val appMasterHandle = Ray.getActor(RayAppMaster.ACTOR_NAME)
+                             .get.asInstanceOf[ActorHandle[RayAppMaster]]
+    val restartedExecutors = RayAppMasterUtils.getRestartedExecutors(appMasterHandle)
+    if (!restartedExecutors.isEmpty) {
+      for (i <- 0 until numExecutors) {
+        if (restartedExecutors.containsKey(executorIds(i))) {
+          val oldId = restartedExecutors.get(executorIds(i))
+          executorIds(i) = oldId
+        }
+      }
+    }
+
+    val sparkConf = df.sqlContext.sparkContext.getConf
+    val appName = sparkConf.get("spark.app.name", "raydp")
+
+    val cpuOpt = sparkConf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_RESOURCE_CPU)
+    val memOpt = sparkConf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_RESOURCE_MEMORY)
+    val nodeAffinityOpt =
+      sparkConf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_NODE_AFFINITY_RESOURCE)
+    val numCpus = cpuOpt.map(_.toDouble).getOrElse(0.0)
+    val memory = memOpt.map(parseMemoryBytes).getOrElse(0.0)
+    val nodeAffinity = nodeAffinityOpt.map(_.toDouble).getOrElse(0.001)
+
+    val schema = ObjectStoreWriter.toArrowSchema(df).toJson
+    val numPartitions = rdd.getNumPartitions
+    val handles = executorIds.map { id =>
+      Ray.getActor("raydp-executor-" + id)
+         .get
+         .asInstanceOf[ActorHandle[RayDPExecutor]]
+    }
+    val handlesMap = (executorIds zip handles).toMap
+    val locations = RayExecutorUtils.getBlockLocations(handles(0), rdd.id, numPartitions)
+
+    val acks = new Array[ObjectRef[java.lang.Boolean]](numPartitions)
+    val owners = new Array[String](numPartitions)
+    val keys = new Array[String](numPartitions)
+    for (i <- 0 until numPartitions) {
+      val executorId = locations(i)
+      val blockStoreActorName = getBlockStoreActorName(appName, executorId)
+      val batchKey = s"rdd-${rdd.id}-$i-${UUID.randomUUID().toString}"
+      owners(i) = blockStoreActorName
+      keys(i) = batchKey
+      acks(i) = RayExecutorUtils.putRDDPartitionToBlockStoreViaRegistry(
+        handlesMap(executorId),
+        rdd.id,
+        i,
+        schema,
+        driverAgentUrl,
+        registryActorName,
+        blockStoreActorName,
+        batchKey,
+        numCpus,
+        memory,
+        nodeAffinity
+      )
+    }
+    val results = new Array[RecordBatch](numPartitions)
+    for (i <- 0 until numPartitions) {
+      acks(i).get()
+      results(i) = RecordBatch(owners(i).getBytes("UTF-8"), keys(i).getBytes("UTF-8"), 0)
+    }
+    results.toSeq.asJava
   }
 
 }

@@ -122,14 +122,26 @@ def _save_spark_df_to_object_store(df: sql.DataFrame, use_batch: bool = True,
     actor_owner_name = owner.actor_name
     records = object_store_writer.save(use_batch, actor_owner_name)
 
-    # Owner-transfer-only path:
-    # JVM returns List[RecordBatch] where record.objectId() contains UTF-8 bytes of batch_key.
-    # Fetch actual ObjectRefs from the owner actor by key.
-    data_owner_actor = ray.get_actor(actor_owner_name)
+    # JVM returns List[RecordBatch] where:
+    # - record.ownerAddress() is UTF-8 bytes of the BlockStore actor name
+    # - record.objectId() is UTF-8 bytes of the batch_key
+    actor_names = [bytes(record.ownerAddress()).decode("utf-8") for record in records]
     batch_keys = [bytes(record.objectId()).decode("utf-8") for record in records]
     block_sizes = [record.numRecords() for record in records]
-    blocks = ray.get(data_owner_actor.get_block_refs.remote(batch_keys))
-    ray.get(owner.set_reference_as_state(data_owner_actor, blocks))
+
+    # Group by BlockStore actor, fetch refs, then restore original order.
+    keys_by_actor = {}
+    for actor_name, key in zip(actor_names, batch_keys):
+        keys_by_actor.setdefault(actor_name, []).append(key)
+
+    refs_by_key = {}
+    for actor_name, keys in keys_by_actor.items():
+        blockstore_actor = ray.get_actor(actor_name)
+        refs = ray.get(blockstore_actor.get_block_refs.remote(keys))
+        for k, ref in zip(keys, refs):
+            refs_by_key[k] = ref
+
+    blocks = [refs_by_key[k] for k in batch_keys]
     return blocks, block_sizes
 
 def spark_dataframe_to_ray_dataset(df: sql.DataFrame,
@@ -155,16 +167,27 @@ def from_spark_recoverable(df: sql.DataFrame,
     sc = df.sql_ctx.sparkSession.sparkContext
     storage_level = sc._getJavaStorageLevel(storage_level)
     object_store_writer = sc._jvm.org.apache.spark.sql.raydp.ObjectStoreWriter
-    object_ids = object_store_writer.fromSparkRDD(df._jdf, storage_level)
-    owner = object_store_writer.getAddress()
-    worker = ray.worker.global_worker
-    blocks = []
-    for object_id in object_ids:
-        object_ref = ray.ObjectRef(object_id)
-        # Register the ownership of the ObjectRef
-        worker.core_worker.deserialize_and_register_object_ref(
-            object_ref.binary(), ray.ObjectRef.nil(), owner, "")
-        blocks.append(object_ref)
+    # Preserve Spark caching, but migrate ownership to Python BlockStore actors
+    # (no Ray private APIs).
+    registry_owner = get_raydp_master_owner(df.sql_ctx.sparkSession)
+    records = object_store_writer.fromSparkRDDToBlockStore(
+        df._jdf, storage_level, registry_owner.actor_name)
+
+    actor_names = [bytes(record.ownerAddress()).decode("utf-8") for record in records]
+    batch_keys = [bytes(record.objectId()).decode("utf-8") for record in records]
+
+    keys_by_actor = {}
+    for actor_name, key in zip(actor_names, batch_keys):
+        keys_by_actor.setdefault(actor_name, []).append(key)
+
+    refs_by_key = {}
+    for actor_name, keys in keys_by_actor.items():
+        blockstore_actor = ray.get_actor(actor_name)
+        refs = ray.get(blockstore_actor.get_block_refs.remote(keys))
+        for k, ref in zip(keys, refs):
+            refs_by_key[k] = ref
+
+    blocks = [refs_by_key[k] for k in batch_keys]
     return from_arrow_refs(blocks)
 
 def _convert_by_udf(spark: sql.SparkSession,

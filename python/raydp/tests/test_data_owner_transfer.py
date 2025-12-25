@@ -6,13 +6,15 @@ from typing import Any
 import pytest
 import ray
 from ray._private.client_mode_hook import client_mode_wrap
+from ray.cluster_utils import Cluster
 from ray.exceptions import RayTaskError, OwnerDiedError
 import ray.util.client as ray_client
+from ray.util.state import list_actors
 import raydp
 from raydp.spark import PartitionObjectsOwner
 from pyspark.sql import SparkSession
 from raydp.spark import get_raydp_master_owner
-from raydp.spark.ray_cluster_master import RayDPObjectOwnerMixin
+from raydp.spark.object_owner import RayDPBlockStoreActorRegistry
 
 
 def gen_test_data(spark_session: SparkSession):
@@ -137,6 +139,112 @@ def test_data_ownership_transfer(ray_cluster, jdk17_extra_spark_configs):
   # final clean up
   raydp.stop_spark()
 
+def _print_actors():
+    # Debug: print all actors, their state, and required resources after stopping Spark.
+    actor_states = list_actors(detail=True)
+    actor_rows = [
+        (a.name, a.state, getattr(a, "required_resources", None))
+        for a in actor_states
+    ]
+    actor_rows.sort(key=lambda x: (str(x[1] or ""), str(x[0] or "")))
+    print("Actors (name, state, required_resources):")
+    for row in actor_rows:
+        print(row)
+
+def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_configs):
+  """
+  Test shutting down Spark worker after data been put
+  into Ray object store with data ownership transfer.
+  This test should be able to execute till the end without crash as expected.
+  """
+  
+  if ray_client.ray.is_connected():
+    pytest.skip("Skip this test if using ray client")
+
+  total_cpu = 5
+  cluster = Cluster(
+        initialize_head=True,
+        head_node_args={
+            "num_cpus": 1,
+            "resources": {"spark_master": 10},
+            "include_dashboard": True,
+            "dashboard_port": 8270,
+        },
+    )
+  cluster.add_node(num_cpus=2, resources={"spark_executor": 2})
+  cluster.add_node(num_cpus=2, resources={"spark_executor": 2})
+
+  ray.init(address=cluster.address, 
+            dashboard_port=cluster.head_node.dashboard_grpc_port,
+            include_dashboard=True)
+            
+  from raydp.spark.dataset import spark_dataframe_to_ray_dataset
+  import numpy as np
+
+  num_executor = 1
+  blockstore_actor_resource_cpu = 1
+  app_name = "example"
+  blockstore_actor_name = f"{app_name}_BLOCKSTORE_0"
+
+  spark = raydp.init_spark(
+    app_name = app_name,
+    num_executors = num_executor,
+    executor_cores = 1,
+    executor_memory = "500M",
+    configs={
+      **jdk17_extra_spark_configs,
+      "spark.ray.raydp_spark_master.actor.resource.spark_master": "1",
+      "spark.ray.raydp_spark_master.actor.resource.CPU": "0",
+      "spark.ray.raydp_spark_executor.actor.resource.spark_executor": "1",
+      "spark.ray.raydp_blockstore.actor.resource.CPU": blockstore_actor_resource_cpu,
+      "spark.ray.raydp_blockstore.actor.resource.memory": "100M",
+    })
+
+  df_train = gen_test_data(spark)
+
+  # convert data from spark dataframe to ray dataset,
+  # and transfer data ownership to dedicated Object Holder (Singleton)
+  ds = spark_dataframe_to_ray_dataset(df_train, parallelism=4,
+                                      owner=get_raydp_master_owner(spark))
+
+  # display data
+  ds.show(5)
+
+  _print_actors()
+  # confirm that blockstore actors have been created
+  resource_stats = ray.available_resources()
+  assert resource_stats['CPU'] == total_cpu \
+    - num_executor \
+    - blockstore_actor_resource_cpu * num_executor
+
+  # release resource by shutting down spark Java process
+  raydp.stop_spark(cleanup_data=False)
+  ray_gc() # ensure GC kicked in
+  time.sleep(10)
+
+  _print_actors()
+  
+  blockstore_actors = list_actors(filters=[("name", "=", blockstore_actor_name)], detail=True)
+  assert len(blockstore_actors) == 1, f"{blockstore_actor_name} actor not found or multiple found"
+  actor_state = blockstore_actors[0]
+  resources = actor_state.required_resources
+
+  assert resources["memory"] == 100 * 1024 * 1024
+  assert resources["CPU"] == blockstore_actor_resource_cpu
+  assert resources["node:127.0.0.1"] == 0.001
+
+  # confirm that resources has been recycled
+  resource_stats = ray.available_resources()
+  assert resource_stats['CPU'] == total_cpu \
+    - blockstore_actor_resource_cpu * num_executor
+
+  # confirm that data is still available from object store!
+  # sanity check the dataset is as functional as normal
+  assert np.isnan(ds.mean('Age')) is not True
+
+  # final clean up
+  raydp.stop_spark()
+
 
 def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_configs):
   """
@@ -146,7 +254,7 @@ def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_c
   """
 
   @ray.remote
-  class CustomActor(RayDPObjectOwnerMixin):
+  class CustomActor(RayDPBlockStoreActorRegistry):
       objects: Any
 
       def wake(self):
