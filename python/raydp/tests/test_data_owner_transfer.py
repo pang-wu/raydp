@@ -199,7 +199,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
             "num_cpus": 1,
             "resources": {"spark_master": 10},
             "include_dashboard": True,
-            "dashboard_port": 8270,
+            "dashboard_port": 8271,
         },
     )
   cluster.add_node(num_cpus=2, resources={"spark_executor": 2})
@@ -280,6 +280,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
 
   # final clean up
   raydp.stop_spark()
+  cluster.shutdown()
 
 
 def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_configs):

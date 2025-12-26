@@ -22,14 +22,13 @@ import platform
 import pytest
 import pyarrow
 import ray
-
-from multiprocessing import get_context
+from ray.job_config import JobConfig
 
 from ray.util.placement_group import placement_group_table
 
 import raydp
 import raydp.utils as utils
-from raydp.spark.ray_cluster_master import RayDPSparkMaster, RAYDP_SPARK_MASTER_SUFFIX
+from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
 from ray.cluster_utils import Cluster
 import ray.util.client as ray_client
 
@@ -46,7 +45,11 @@ def test_legacy_spark_on_fractional_cpu(jdk17_extra_spark_configs):
             "num_cpus": 2
         })
 
-    ray.init(address=cluster.address, include_dashboard=False)
+    ray.init(
+        address=cluster.address,
+        include_dashboard=False,
+        job_config=JobConfig(code_search_path=[os.getcwd()]),
+    )
     spark = raydp.init_spark(app_name="test_cpu_fraction",
                              num_executors=1, executor_cores=3, executor_memory="500M",
                              configs={"spark.ray.actor.resource.cpu": "0.1",
@@ -267,7 +270,11 @@ def test_reconstruction(jdk17_extra_spark_configs):
         }
     )
     
-    ray.init(address=cluster.address, include_dashboard=False)
+    ray.init(
+        address=cluster.address,
+        include_dashboard=False,
+        job_config=JobConfig(code_search_path=[os.getcwd()]),
+    )
     # init_spark before adding nodes to ensure drivers connect to the head node
     spark = raydp.init_spark('a', 2, 1, '500m', fault_tolerant_mode=True,
                              configs=jdk17_extra_spark_configs)

@@ -35,6 +35,27 @@ from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
 
 logger = logging.getLogger(__name__)
 
+@ray.remote(max_retries=-1)
+def _fetch_arrow_table_from_executor(executor_actor_name: str,
+                                     rdd_id: int,
+                                     partition_id: int,
+                                     schema_json: str,
+                                     driver_agent_url: str) -> pa.Table:
+    """Fetch cached Arrow IPC bytes from a JVM executor actor and decode into a pyarrow.Table.
+
+    This is used by `from_spark_recoverable` to build Ray Dataset blocks with Ray task lineage,
+    enabling Ray object reconstruction after node loss.
+
+    NOTE: Calling JVM actors from Python requires Ray cross-language support to be enabled
+    (ray.init(load_code_from_local=True)).
+    """
+    executor_actor = ray.get_actor(executor_actor_name)
+    ipc_bytes = ray.get(
+        executor_actor.getRDDPartition.remote(
+            rdd_id, partition_id, schema_json, driver_agent_url))
+    reader = pa.ipc.open_stream(pa.BufferReader(ipc_bytes))
+    return reader.read_all()
+
 
 class RecordPiece:
     def __init__(self, row_ids, num_rows: int):
@@ -167,28 +188,31 @@ def from_spark_recoverable(df: sql.DataFrame,
     sc = df.sql_ctx.sparkSession.sparkContext
     storage_level = sc._getJavaStorageLevel(storage_level)
     object_store_writer = sc._jvm.org.apache.spark.sql.raydp.ObjectStoreWriter
-    # Preserve Spark caching, but migrate ownership to Python BlockStore actors
-    # (no Ray private APIs).
-    registry_owner = get_raydp_master_owner(df.sql_ctx.sparkSession)
-    records = object_store_writer.fromSparkRDDToBlockStore(
-        df._jdf, storage_level, registry_owner.actor_name)
+    # Recoverable conversion for Ray node loss:
+    # - cache Arrow bytes in Spark
+    # - build Ray Dataset blocks via Ray tasks (lineage), each task refetches bytes via JVM actors
+    info = object_store_writer.prepareRecoverableRDD(df._jdf, storage_level)
+    rdd_id = info.rddId()
+    num_partitions = info.numPartitions()
+    schema_json = info.schemaJson()
+    driver_agent_url = info.driverAgentUrl()
+    locations = info.locations()
 
-    actor_names = [bytes(record.ownerAddress()).decode("utf-8") for record in records]
-    batch_keys = [bytes(record.objectId()).decode("utf-8") for record in records]
+    refs: List[ObjectRef] = []
+    for i in range(num_partitions):
+        executor_id = locations[i]
+        executor_actor_name = f"raydp-executor-{executor_id}"
+        refs.append(
+            _fetch_arrow_table_from_executor.remote(
+                executor_actor_name,
+                rdd_id,
+                i,
+                schema_json,
+                driver_agent_url,
+            )
+        )
 
-    keys_by_actor = {}
-    for actor_name, key in zip(actor_names, batch_keys):
-        keys_by_actor.setdefault(actor_name, []).append(key)
-
-    refs_by_key = {}
-    for actor_name, keys in keys_by_actor.items():
-        blockstore_actor = ray.get_actor(actor_name)
-        refs = ray.get(blockstore_actor.get_block_refs.remote(keys))
-        for k, ref in zip(keys, refs):
-            refs_by_key[k] = ref
-
-    blocks = [refs_by_key[k] for k in batch_keys]
-    return from_arrow_refs(blocks)
+    return from_arrow_refs(refs)
 
 def _convert_by_udf(spark: sql.SparkSession,
                     blocks: List[ObjectRef],

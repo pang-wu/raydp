@@ -348,31 +348,28 @@ object ObjectStoreWriter {
   }
 
   /**
-   * Recoverable Spark->Ray Dataset conversion without Ray private APIs:
-   * persist Arrow batches in Spark, then push cached partitions into Python BlockStore actors
-   * (owned by Python) via the given registry actor.
+   * Prepare a Spark ArrowBatch RDD for recoverable conversion and return metadata needed by
+   * Python to build reconstructable Ray Dataset blocks via Ray tasks.
    *
-   * This returns application-level locators in RecordBatch:
-   * - ownerAddress: UTF-8 BlockStore actor name
-   * - objectId: UTF-8 batch key
+   * This method:
+   * - persists and materializes the ArrowBatch RDD in Spark (so partitions can be re-fetched)
+   * - computes per-partition executor locations (Spark executor IDs)
+   *
+   * It does NOT push any data to Ray.
    */
-  def fromSparkRDDToBlockStore(
+  def prepareRecoverableRDD(
       df: DataFrame,
-      storageLevel: StorageLevel,
-      registryActorName: String): List[RecordBatch] = {
+      storageLevel: StorageLevel): RecoverableRDDInfo = {
     if (!Ray.isInitialized) {
       throw new RayDPException(
         "Not yet connected to Ray! Please set fault_tolerant_mode=True when starting RayDP.")
-    }
-    if (registryActorName == null || registryActorName.isEmpty) {
-      throw new RayDPException("registryActorName must be set for recoverable conversion.")
     }
 
     val rdd = df.toArrowBatchRdd
     rdd.persist(storageLevel)
     rdd.count()
 
-    val executorIds = df.sqlContext.sparkContext.getExecutorIds.toArray
+    var executorIds = df.sqlContext.sparkContext.getExecutorIds.toArray
     val numExecutors = executorIds.length
     val appMasterHandle = Ray.getActor(RayAppMaster.ACTOR_NAME)
                              .get.asInstanceOf[ActorHandle[RayAppMaster]]
@@ -386,58 +383,31 @@ object ObjectStoreWriter {
       }
     }
 
-    val sparkConf = df.sqlContext.sparkContext.getConf
-    val appName = sparkConf.get("spark.app.name", "raydp")
-
-    val cpuOpt = sparkConf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_RESOURCE_CPU)
-    val memOpt = sparkConf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_RESOURCE_MEMORY)
-    val nodeAffinityOpt =
-      sparkConf.getOption(SparkOnRayConfigs.BLOCKSTORE_ACTOR_NODE_AFFINITY_RESOURCE)
-    val numCpus = cpuOpt.map(_.toDouble).getOrElse(0.0)
-    val memory = memOpt.map(parseMemoryBytes).getOrElse(0.0)
-    val nodeAffinity = nodeAffinityOpt.map(_.toDouble).getOrElse(0.001)
-
-    val schema = ObjectStoreWriter.toArrowSchema(df).toJson
+    val schemaJson = ObjectStoreWriter.toArrowSchema(df).toJson
     val numPartitions = rdd.getNumPartitions
+
     val handles = executorIds.map { id =>
       Ray.getActor("raydp-executor-" + id)
          .get
          .asInstanceOf[ActorHandle[RayDPExecutor]]
     }
-    val handlesMap = (executorIds zip handles).toMap
     val locations = RayExecutorUtils.getBlockLocations(handles(0), rdd.id, numPartitions)
 
-    val acks = new Array[ObjectRef[java.lang.Boolean]](numPartitions)
-    val owners = new Array[String](numPartitions)
-    val keys = new Array[String](numPartitions)
-    for (i <- 0 until numPartitions) {
-      val executorId = locations(i)
-      val blockStoreActorName = getBlockStoreActorName(appName, executorId)
-      val batchKey = s"rdd-${rdd.id}-$i-${UUID.randomUUID().toString}"
-      owners(i) = blockStoreActorName
-      keys(i) = batchKey
-      acks(i) = RayExecutorUtils.putRDDPartitionToBlockStoreViaRegistry(
-        handlesMap(executorId),
-        rdd.id,
-        i,
-        schema,
-        driverAgentUrl,
-        registryActorName,
-        blockStoreActorName,
-        batchKey,
-        numCpus,
-        memory,
-        nodeAffinity
-      )
-    }
-    val results = new Array[RecordBatch](numPartitions)
-    for (i <- 0 until numPartitions) {
-      acks(i).get()
-      results(i) = RecordBatch(owners(i).getBytes("UTF-8"), keys(i).getBytes("UTF-8"), 0)
-    }
-    results.toSeq.asJava
+    RecoverableRDDInfo(rdd.id, numPartitions, schemaJson, driverAgentUrl, locations)
   }
 
+}
+
+case class RecoverableRDDInfo(
+    rddId: Int,
+    numPartitions: Int,
+    schemaJson: String,
+    driverAgentUrl: String,
+    locations: Array[String])
+
+object RecoverableRDDInfo {
+  // Empty constructor for reflection / Java interop (some tools expect it).
+  def empty: RecoverableRDDInfo = RecoverableRDDInfo(0, 0, "", "", Array.empty[String])
 }
 
 object ObjectRefHolder {
