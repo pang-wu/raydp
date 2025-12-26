@@ -151,6 +151,37 @@ def _print_actors():
     for row in actor_rows:
         print(row)
 
+def _get_ray_node_ip_by_node_id(node_id: str) -> str:
+    for n in ray.nodes():
+        if n.get("NodeID") == node_id:
+            ip = n.get("NodeManagerAddress")
+            if ip:
+                return ip
+    raise AssertionError(f"Cannot resolve node ip for node_id={node_id}. ray.nodes()={ray.nodes()}")
+
+
+def _get_executor_node_ip(executor_actor_name: str) -> str:
+    """Resolve executor node ip via Ray APIs (actor->node_id, node_id->ray.nodes())."""
+    actors = list_actors(filters=[("name", "=", executor_actor_name)], detail=True)
+    assert len(actors) == 1, f"{executor_actor_name} actor not found or multiple found"
+    node_id = getattr(actors[0], "node_id", None) or getattr(actors[0], "nodeId", None)
+    assert node_id, f"Missing node_id on actor state for {executor_actor_name}: {actors[0]}"
+    return _get_ray_node_ip_by_node_id(node_id)
+
+
+def _get_single_executor_actor_name() -> str:
+    """Find the single RayDP executor actor name in this test."""
+    actors = list_actors(detail=True)
+    names = [
+        a.name for a in actors
+        if getattr(a, "name", None)
+        and a.name.startswith("raydp-executor-")
+        and getattr(a, "state", None) == "ALIVE"
+    ]
+    assert len(names) == 1, f"Expected exactly one executor actor, got: {names}"
+    return names[0]
+
+
 def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_configs):
   """
   Test shutting down Spark worker after data been put
@@ -217,6 +248,11 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
     - num_executor \
     - blockstore_actor_resource_cpu * num_executor
 
+  # Derive the expected node IP from Ray's node table, via the Spark executor actor placement.
+  # This avoids reading the blockstore actor's own state to "discover" its node IP.
+  executor_actor_name = _get_single_executor_actor_name()
+  expected_node_ip = _get_executor_node_ip(executor_actor_name)
+
   # release resource by shutting down spark Java process
   raydp.stop_spark(cleanup_data=False)
   ray_gc() # ensure GC kicked in
@@ -231,7 +267,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
 
   assert resources["memory"] == 100 * 1024 * 1024
   assert resources["CPU"] == blockstore_actor_resource_cpu
-  assert resources["node:127.0.0.1"] == 0.001
+  assert resources[f"node:{expected_node_ip}"] == 0.001
 
   # confirm that resources has been recycled
   resource_stats = ray.available_resources()
