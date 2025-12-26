@@ -31,6 +31,7 @@ from ray.data import Dataset, from_arrow_refs
 from ray.types import ObjectRef
 from ray._private.client_mode_hook import client_mode_wrap
 from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
+from raydp.utils import parse_memory_size
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def _fetch_arrow_table_from_executor(executor_actor_name: str,
     enabling Ray object reconstruction after node loss.
 
     NOTE: Calling JVM actors from Python requires Ray cross-language support to be enabled
-    (ray.init(load_code_from_local=True)).
+    https://docs.ray.io/en/latest/ray-core/cross-language.html.
     """
     executor_actor = ray.get_actor(executor_actor_name)
     ipc_bytes = ray.get(
@@ -198,12 +199,25 @@ def from_spark_recoverable(df: sql.DataFrame,
     driver_agent_url = info.driverAgentUrl()
     locations = info.locations()
 
+    spark_conf = sc.getConf()
+    fetch_num_cpus = float(
+        spark_conf.get("spark.ray.raydp_recoverable_fetch.task.resource.CPU", "0") or 0)
+    fetch_memory_str = spark_conf.get(
+        "spark.ray.raydp_recoverable_fetch.task.resource.memory", "0")
+    fetch_memory = float(parse_memory_size(fetch_memory_str))
+
+
     refs: List[ObjectRef] = []
     for i in range(num_partitions):
         executor_id = locations[i]
         executor_actor_name = f"raydp-executor-{executor_id}"
+        task_opts = {
+            "num_cpus": fetch_num_cpus,
+            "memory": fetch_memory,
+        }
+        fetch_task = _fetch_arrow_table_from_executor.options(**task_opts)
         refs.append(
-            _fetch_arrow_table_from_executor.remote(
+            fetch_task.remote(
                 executor_actor_name,
                 rdd_id,
                 i,

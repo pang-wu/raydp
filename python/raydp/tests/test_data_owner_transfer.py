@@ -280,6 +280,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
 
   # final clean up
   raydp.stop_spark()
+  ray.shutdown()
   cluster.shutdown()
 
 

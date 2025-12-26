@@ -70,7 +70,8 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
       ownerName: String): RecordBatch = {
 
     // Owner-transfer only implementation:
-    // - ownerName must always be provided (non-empty) and refer to a Python actor.
+    // - ownerName must always be provided (non-empty) and refer to a Python actor
+    //   implemented RayDPBlockStoreActorRegistry.
     // - JVM never creates/handles Ray ObjectRefs for the dataset blocks.
     // - JVM returns only a per-batch key encoded in RecordBatch.objectId (bytes),
     //   and Python will fetch the real ObjectRefs from the owner actor by key.
@@ -227,7 +228,7 @@ class ObjectStoreWriter(@transient val df: DataFrame) extends Serializable {
   /**
    * For test.
    */
-  def getRandomRef(): List[_] = {
+  def getRandomRef(): List[Array[Byte]] = {
 
     df.queryExecution.toRdd.mapPartitions { _ =>
       Iterator(ObjectRefHolder.getRandom(uuid))
@@ -411,7 +412,7 @@ object RecoverableRDDInfo {
 }
 
 object ObjectRefHolder {
-  type Queue = ConcurrentLinkedQueue[ObjectRef[_]]
+  type Queue = ConcurrentLinkedQueue[ObjectRef[Array[Byte]]]
   private val dfToQueue = new ConcurrentHashMap[UUID, Queue]()
 
   def getQueue(df: UUID): Queue = {
@@ -436,7 +437,7 @@ object ObjectRefHolder {
     queue.size()
   }
 
-  def getRandom(df: UUID): Any = {
+  def getRandom(df: UUID): Array[Byte] = {
     val queue = checkQueueExists(df)
     val ref = RayDPUtils.convert(queue.peek())
     ref.get()
