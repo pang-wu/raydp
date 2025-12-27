@@ -160,7 +160,11 @@ RayDP now supports converting data in a way such that the resulting ray dataset 
 import ray
 import raydp
 
-ray.init(address="auto")
+# Fault tolerance requires cross language support:
+# https://docs.ray.io/en/latest/ray-core/cross-language.html
+# set job_config to trigger load-code-from-local
+ray.init(address="auto", 
+         job_config=JobConfig(code_search_path=[os.getcwd()]))
 # set fault_tolerance_mode to True to enable the feature
 # this will connect pyspark driver to ray cluster
 spark = raydp.init_spark(app_name="RayDP Example",

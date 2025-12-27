@@ -51,6 +51,10 @@ def _fetch_arrow_table_from_executor(executor_actor_name: str,
     https://docs.ray.io/en/latest/ray-core/cross-language.html.
     """
     executor_actor = ray.get_actor(executor_actor_name)
+    # cross-language actor call requires a bug fix in ray 2.37.0 to work,
+    # https://github.com/ray-project/ray/pull/46770
+    # particular:
+    # https://github.com/ray-project/ray/commit/a1be06346e532e656c128ffd2230f06a4d72679e
     ipc_bytes = ray.get(
         executor_actor.getRDDPartition.remote(
             rdd_id, partition_id, schema_json, driver_agent_url))
