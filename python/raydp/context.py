@@ -21,12 +21,55 @@ from threading import RLock
 from typing import Dict, List, Union, Optional
 
 import ray
+import pyspark
 from pyspark.sql import SparkSession
 
 from ray.util.placement_group import PlacementGroup
 
 from raydp.spark import SparkCluster
 from raydp.utils import parse_memory_size
+
+
+def _reset_pyspark_singletons():
+    """
+    Best-effort cleanup of PySpark singleton state.
+
+    In long-lived Python processes (pytest, notebooks), PySpark may keep cached references
+    to SparkSession / SparkContext even after SparkSession.stop(). Subsequent
+    SparkSession.builder.getOrCreate() calls can then reuse the prior SparkContext and its
+    SparkConf, leaking configs across tests and potentially causing hangs (e.g. stale RayDP
+    executor resource requirements).
+
+    This uses internal (underscored) PySpark attributes on purpose as a pragmatic workaround.
+    """
+    # SparkSession caches
+    try:
+        if hasattr(SparkSession, "_instantiatedSession"):
+            SparkSession._instantiatedSession = None
+        if hasattr(SparkSession, "_activeSession"):
+            SparkSession._activeSession = None
+    except Exception:
+        pass
+
+    # SparkSession.builder is a process-global singleton (SparkSession.builder = Builder()) and
+    # Builder stores its options in class-level fields. These options persist across tests and
+    # can silently re-apply stale SparkConf keys (e.g. RayDP executor custom resources).
+    try:
+        builder = getattr(SparkSession, "builder", None)
+        if builder is not None:
+            if hasattr(builder, "_options"):
+                builder._options = {}
+            if hasattr(builder, "_sc"):
+                builder._sc = None
+    except Exception:
+        pass
+
+    # SparkContext cache
+    try:
+        if hasattr(pyspark.SparkContext, "_active_spark_context"):
+            pyspark.SparkContext._active_spark_context = None
+    except Exception:
+        pass
 
 
 class _SparkContext(ContextDecorator):
@@ -130,6 +173,7 @@ class _SparkContext(ContextDecorator):
             jvm.shutdownRay()
             self._spark_session.stop()
             self._spark_session = None
+            _reset_pyspark_singletons()
         if self._spark_cluster is not None:
             self._spark_cluster.stop(cleanup_data)
             if cleanup_data:
@@ -226,9 +270,14 @@ def stop_spark(cleanup_data=True):
     with _spark_context_lock:
         global _global_spark_context
         if _global_spark_context is not None:
-            _global_spark_context.stop(cleanup_data)
-            if cleanup_data is True:
-                _global_spark_context = None
+            try:
+                _global_spark_context.stop(cleanup_data)
+            finally:
+                # If the caller requests cleanup, always clear the global reference even
+                # if teardown raises (e.g. Ray cluster already changed / actor missing).
+                if cleanup_data is True:
+                    _global_spark_context = None
+                _reset_pyspark_singletons()
 
 
 atexit.register(stop_spark)

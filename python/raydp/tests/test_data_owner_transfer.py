@@ -256,7 +256,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
   # release resource by shutting down spark Java process
   raydp.stop_spark(cleanup_data=False)
   ray_gc() # ensure GC kicked in
-  time.sleep(10)
+  time.sleep(3)
 
   _print_actors()
   
@@ -280,6 +280,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
 
   # final clean up
   raydp.stop_spark()
+  time.sleep(3)
   ray.shutdown()
   cluster.shutdown()
 
