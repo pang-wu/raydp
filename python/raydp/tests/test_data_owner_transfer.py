@@ -205,9 +205,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
   cluster.add_node(num_cpus=2, resources={"spark_executor": 2})
   cluster.add_node(num_cpus=2, resources={"spark_executor": 2})
 
-  ray.init(address=cluster.address, 
-            dashboard_port=cluster.head_node.dashboard_grpc_port,
-            include_dashboard=True)
+  ray.init(address=cluster.address)
             
   from raydp.spark.dataset import spark_dataframe_to_ray_dataset
   import numpy as np
