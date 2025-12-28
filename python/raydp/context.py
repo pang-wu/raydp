@@ -21,7 +21,6 @@ from threading import RLock
 from typing import Dict, List, Union, Optional
 
 import ray
-import pyspark
 from pyspark.sql import SparkSession
 
 from ray.util.placement_group import PlacementGroup
@@ -42,34 +41,14 @@ def _reset_pyspark_singletons():
 
     This uses internal (underscored) PySpark attributes on purpose as a pragmatic workaround.
     """
-    # SparkSession caches
-    try:
-        if hasattr(SparkSession, "_instantiatedSession"):
-            SparkSession._instantiatedSession = None
-        if hasattr(SparkSession, "_activeSession"):
-            SparkSession._activeSession = None
-    except Exception:
-        pass
 
     # SparkSession.builder is a process-global singleton (SparkSession.builder = Builder()) and
     # Builder stores its options in class-level fields. These options persist across tests and
     # can silently re-apply stale SparkConf keys (e.g. RayDP executor custom resources).
-    try:
-        builder = getattr(SparkSession, "builder", None)
-        if builder is not None:
-            if hasattr(builder, "_options"):
-                builder._options = {}
-            if hasattr(builder, "_sc"):
-                builder._sc = None
-    except Exception:
-        pass
+    builder = SparkSession.builder
+    if hasattr(builder, "_options") and isinstance(builder._options, dict):
+        builder._options.clear()
 
-    # SparkContext cache
-    try:
-        if hasattr(pyspark.SparkContext, "_active_spark_context"):
-            pyspark.SparkContext._active_spark_context = None
-    except Exception:
-        pass
 
 
 class _SparkContext(ContextDecorator):
