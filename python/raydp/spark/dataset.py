@@ -18,6 +18,7 @@ import uuid
 from typing import Callable, List, Optional, Union
 from dataclasses import dataclass
 
+from packaging import version
 import pandas as pd
 import pyarrow as pa
 import pyspark.sql as sql
@@ -307,3 +308,10 @@ def ray_dataset_to_spark_dataframe(spark: sql.SparkSession,
         return _convert_by_udf(spark, blocks, locations, schema)
     else:
         raise RuntimeError("ray.to_spark only supports arrow type blocks")
+
+
+def read_spark_parquet(path: str) -> Dataset:
+    if version.parse(ray.__version__) < version.parse("2.50.0"):
+        return ray.data.read_parquet(path)
+    else:
+        return ray.data.read_parquet(path, file_extensions=["parquet"])
