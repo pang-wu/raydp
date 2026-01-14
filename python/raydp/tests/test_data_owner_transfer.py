@@ -14,7 +14,7 @@ import raydp
 from raydp.spark import PartitionObjectsOwner
 from pyspark.sql import SparkSession
 from raydp.spark import get_raydp_master_owner
-from raydp.spark.object_owner import RayDPBlockStoreActorRegistry
+from raydp.spark.object_owner import RayDPDataOwner
 
 
 def gen_test_data(spark_session: SparkSession):
@@ -272,7 +272,7 @@ def test_custom_ownership_transfer_custom_actor(ray_cluster, jdk17_extra_spark_c
   """
 
   @ray.remote
-  class CustomActor(RayDPBlockStoreActorRegistry):
+  class CustomActor(RayDPDataOwner):
       objects: Any
 
       def wake(self):

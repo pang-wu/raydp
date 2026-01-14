@@ -29,7 +29,7 @@ import glob
 import ray
 from py4j.java_gateway import JavaGateway, GatewayParameters
 from raydp import versions
-from raydp.spark.object_owner import RayDPBlockStoreActorRegistry
+from raydp.spark.object_owner import RayDPDataOwner
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ SPARK_LOG4J_CONFIG_FILE_NAME = "spark.log4j.config.file.name"
 RAY_LOG4J_CONFIG_FILE_NAME = "spark.ray.log4j.config.file.name"
 
 @ray.remote
-class RayDPSparkMaster(RayDPBlockStoreActorRegistry):
+class RayDPSparkMaster(RayDPDataOwner):
     def __init__(self, configs):
         self._gateway = None
         self._app_master_java_bridge = None

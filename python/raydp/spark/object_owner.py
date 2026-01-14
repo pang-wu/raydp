@@ -20,7 +20,7 @@ from typing import Dict, List
 import ray
 from ray.types import ObjectRef
 
-class RayDPBlockStoreActorRegistry:
+class RayDPDataOwner:
     """Registry mixin for single-owner Spark->Ray Dataset conversion.
 
     JVM side behavior:
