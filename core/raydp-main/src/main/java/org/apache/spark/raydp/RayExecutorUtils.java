@@ -25,7 +25,6 @@ import io.ray.api.placementgroup.PlacementGroup;
 import io.ray.runtime.object.ObjectRefImpl;
 import java.util.List;
 import java.util.Map;
-import org.apache.spark.executor.PutRDDPartitionToBlockStoreArgs;
 import org.apache.spark.executor.RayDPExecutor;
 
 public class RayExecutorUtils {
@@ -85,33 +84,6 @@ public class RayExecutorUtils {
     return (ObjectRefImpl<byte[]>)
         handle.task(RayDPExecutor::getRDDPartition, rddId, partitionId, schema, driverAgentUrl)
             .remote();
-  }
-
-  public static ObjectRef<Boolean> putRDDPartitionToBlockStoreViaRegistry(
-      ActorHandle<RayDPExecutor> handle,
-      int rddId,
-      int partitionId,
-      String schema,
-      String driverAgentUrl,
-      String registryActorName,
-      String blockStoreActorName,
-      String batchKey,
-      double numCpus,
-      double memory,
-      double nodeAffinity) {
-    PutRDDPartitionToBlockStoreArgs args =
-        new PutRDDPartitionToBlockStoreArgs(
-            rddId,
-            partitionId,
-            schema,
-            driverAgentUrl,
-            registryActorName,
-            blockStoreActorName,
-            batchKey,
-            numCpus,
-            memory,
-            nodeAffinity);
-    return handle.task(RayDPExecutor::putRDDPartitionToBlockStoreViaRegistry, args).remote();
   }
 
   public static void exitExecutor(ActorHandle<RayDPExecutor> handle) {

@@ -150,25 +150,19 @@ def _save_spark_df_to_object_store(df: sql.DataFrame, use_batch: bool = True,
     records = object_store_writer.save(use_batch, actor_owner_name)
 
     # JVM returns List[RecordBatch] where:
-    # - record.ownerAddress() is UTF-8 bytes of the BlockStore actor name
+    # - record.ownerAddress() is UTF-8 bytes of the Spark executor (RayDPExecutor) actor name
     # - record.objectId() is UTF-8 bytes of the batch_key
     actor_names = [bytes(record.ownerAddress()).decode("utf-8") for record in records]
     batch_keys = [bytes(record.objectId()).decode("utf-8") for record in records]
     block_sizes = [record.numRecords() for record in records]
 
-    # Group by BlockStore actor, fetch refs, then restore original order.
-    keys_by_actor = {}
-    for actor_name, key in zip(actor_names, batch_keys):
-        keys_by_actor.setdefault(actor_name, []).append(key)
-
-    refs_by_key = {}
-    for actor_name, keys in keys_by_actor.items():
-        blockstore_actor = ray.get_actor(actor_name)
-        refs = ray.get(blockstore_actor.get_block_refs.remote(keys))
-        for k, ref in zip(keys, refs):
-            refs_by_key[k] = ref
-
-    blocks = [refs_by_key[k] for k in batch_keys]
+    # Materialize blocks via the owner actor so the owner actor becomes the Ray owner
+    # of the returned Dataset blocks (ObjectRefs), while the blocks are still produced
+    # on (and typically stored on) executor nodes for locality.
+    owner_actor = ray.get_actor(actor_owner_name)
+    blocks = ray.get(owner_actor.fetch_block_refs.remote(actor_names, batch_keys))
+    # Keep refs in owner actor state to prevent owner-side GC from releasing ownership.
+    owner.set_reference_as_state(owner_actor, blocks)
     return blocks, block_sizes
 
 def spark_dataframe_to_ray_dataset(df: sql.DataFrame,

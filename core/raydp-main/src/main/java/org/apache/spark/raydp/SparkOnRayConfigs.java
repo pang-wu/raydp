@@ -10,19 +10,6 @@ public class SparkOnRayConfigs {
     public static final String SPARK_MASTER_ACTOR_RESOURCE_PREFIX =
             "spark.ray.raydp_spark_master.actor.resource";
 
-    public static final String BLOCKSTORE_ACTOR_RESOURCE_CPU =
-            "spark.ray.raydp_blockstore.actor.resource.CPU";
-    public static final String BLOCKSTORE_ACTOR_RESOURCE_MEMORY =
-            "spark.ray.raydp_blockstore.actor.resource.memory";
-    /**
-     * Node affinity resource fraction used to pin per-executor BlockStore actors to the executor
-     * node via the special "node:&lt;ip&gt;" resource. Ray provides 1.0 of this resource per node.
-     *
-     * Defaults to 0.001 (allowing up to ~1000 such actors per node).
-     */
-    public static final String BLOCKSTORE_ACTOR_NODE_AFFINITY_RESOURCE =
-            "spark.ray.raydp_blockstore.actor.resource.node_affinity";
-
     /**
      * Extra JVM options for the RayDP AppMaster actor and gateway process.
      * This is useful for passing JDK 17+ --add-opens flags.

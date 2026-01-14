@@ -20,16 +20,13 @@ package org.apache.spark.executor
 import java.io.{ByteArrayOutputStream, File}
 import java.nio.channels.Channels
 import java.nio.file.Paths
-import java.util.Optional
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.reflect.classTag
 
 import com.intel.raydp.shims.SparkShimLoader
-import io.ray.api.PyActorHandle
 import io.ray.api.Ray
-import io.ray.api.call.PyActorTaskCaller
-import io.ray.api.function.PyActorMethod
 import io.ray.runtime.config.RayConfig
 import org.apache.arrow.vector.ipc.{ArrowStreamWriter, WriteChannel}
 import org.apache.arrow.vector.ipc.message.{IpcOption, MessageSerializer}
@@ -272,6 +269,22 @@ class RayDPExecutor(
     Ray.exitActor
   }
 
+  /**
+   * Pop (remove and return) a previously stored Arrow IPC stream by key.
+   *
+   * This method is intended to be called from a Python "owner/registry" actor via Ray
+   * cross-language actor calls. Since the Python actor is the caller, Ray will assign
+   * ownership of the returned object to that Python actor.
+   */
+  def popArrowIPC(batchKey: String): Array[Byte] = {
+    val bytes = RayDPExecutor.popArrowIPC(batchKey)
+    if (bytes == null) {
+      throw new RayDPException(
+        s"Missing Arrow IPC bytes for batchKey=$batchKey on executorId=$executorId.")
+    }
+    bytes
+  }
+
   def getBlockLocations(rddId: Int, numPartitions: Int): Array[String] = {
     val env = SparkEnv.get
     val blockIds = (0 until numPartitions).map(i =>
@@ -353,63 +366,18 @@ class RayDPExecutor(
     byteOut.close
     result
   }
-
-  /**
-   * For recoverable Spark->Ray Dataset conversion:
-   * read cached Arrow IPC bytes from Spark block manager, then push them into a Python BlockStore
-   * actor created via a Python registry actor.
-   */
-  def putRDDPartitionToBlockStoreViaRegistry(
-      args: PutRDDPartitionToBlockStoreArgs): Boolean = {
-    val bytes = getRDDPartition(args.rddId, args.partitionId, args.schemaStr, args.driverAgentUrl)
-
-    val registryOpt = Ray.getActor(args.registryActorName).asInstanceOf[Optional[AnyRef]]
-    if (!registryOpt.isPresent) {
-      throw new RayDPException(s"Registry actor ${args.registryActorName} not found.")
-    }
-    val regAny: AnyRef = registryOpt.get()
-    if (!regAny.isInstanceOf[PyActorHandle]) {
-      throw new RayDPException(s"Registry actor ${args.registryActorName} is not a Python actor.")
-    }
-    val registryHandle = regAny.asInstanceOf[PyActorHandle]
-
-    val getActorMethod =
-      PyActorMethod.of("get_or_create_blockstore_actor", classOf[java.lang.Boolean])
-    val createArgs: Array[AnyRef] = Array(
-      args.blockStoreActorName,
-      nodeIp,
-      Double.box(args.numCpus),
-      Double.box(args.memory),
-      Double.box(args.nodeAffinity)
-    )
-    new PyActorTaskCaller(registryHandle, getActorMethod, createArgs).remote().get()
-
-    val bsOpt = Ray.getActor(args.blockStoreActorName).asInstanceOf[Optional[AnyRef]]
-    if (!bsOpt.isPresent) {
-      throw new RayDPException(s"BlockStore actor ${args.blockStoreActorName} not found.")
-    }
-    val bsAny: AnyRef = bsOpt.get()
-    if (!bsAny.isInstanceOf[PyActorHandle]) {
-      throw new RayDPException(
-        s"BlockStore actor ${args.blockStoreActorName} is not a Python actor.")
-    }
-    val bsHandle = bsAny.asInstanceOf[PyActorHandle]
-
-    val putMethod = PyActorMethod.of("put_arrow_ipc", classOf[java.lang.Boolean])
-    val putArgs: Array[AnyRef] = Array(args.batchKey, bytes.asInstanceOf[AnyRef])
-    new PyActorTaskCaller(bsHandle, putMethod, putArgs).remote().get()
-    true
-  }
 }
 
-case class PutRDDPartitionToBlockStoreArgs(
-    rddId: Int,
-    partitionId: Int,
-    schemaStr: String,
-    driverAgentUrl: String,
-    registryActorName: String,
-    blockStoreActorName: String,
-    batchKey: String,
-    numCpus: Double,
-    memory: Double,
-    nodeAffinity: Double) extends Serializable
+object RayDPExecutor {
+  // Per-executor in-memory buffer for Arrow IPC streams produced by Spark tasks.
+  // Stored in the executor (Ray actor) process; entries are removed by popArrowIPC.
+  private val arrowIpcByKey = new ConcurrentHashMap[String, Array[Byte]]()
+
+  def putArrowIPC(batchKey: String, bytes: Array[Byte]): Unit = {
+    arrowIpcByKey.put(batchKey, bytes)
+  }
+
+  def popArrowIPC(batchKey: String): Array[Byte] = {
+    arrowIpcByKey.remove(batchKey)
+  }
+}
