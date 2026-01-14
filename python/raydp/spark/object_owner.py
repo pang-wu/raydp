@@ -20,6 +20,14 @@ from typing import Dict, List
 import ray
 from ray.types import ObjectRef
 
+try:
+    # Ray cross-language calls (Python -> JVM actors) require enabling load_code_from_local.
+    # This is an internal Ray API; keep it isolated and optional.
+    from ray._private.worker import global_worker as _ray_global_worker  # type: ignore
+except Exception:  # pragma: no cover
+    _ray_global_worker = None
+
+
 class RayDPDataOwner:
     """Registry mixin for single-owner Spark->Ray Dataset conversion.
 
@@ -36,15 +44,14 @@ class RayDPDataOwner:
       refs to Arrow IPC streaming bytes and will decode them internally as needed.
     """
 
-    def fetch_block_refs(self, executor_actor_names: List[str], batch_keys: List[str]) -> List[ObjectRef]:
-        # Ray cross-language calls (Python -> JVM actors) require the driver/worker to allow
-        # loading code from local. In some environments/tests we don't start Ray with
-        # `--load-code-from-local`, so we enable it programmatically here.
-        try:
-            from ray._private.worker import global_worker
-            global_worker.set_load_code_from_local(True)
-        except Exception:
-            pass
+    def fetch_block_refs(
+        self,
+        executor_actor_names: List[str],
+        batch_keys: List[str],
+    ) -> List[ObjectRef]:
+        # Enable Ray cross-language support if available.
+        if _ray_global_worker is not None:
+            _ray_global_worker.set_load_code_from_local(True)
 
         if len(executor_actor_names) != len(batch_keys):
             raise ValueError(

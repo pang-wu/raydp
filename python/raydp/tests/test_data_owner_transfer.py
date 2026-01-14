@@ -199,7 +199,7 @@ def test_data_ownership_transfer_with_custom_actor_resources(jdk17_extra_spark_c
             "num_cpus": 1,
             "resources": {"spark_master": 10},
             "include_dashboard": True,
-            "dashboard_port": 8271,
+            "dashboard_port": 0,
         },
     )
   cluster.add_node(num_cpus=2, resources={"spark_executor": 2})

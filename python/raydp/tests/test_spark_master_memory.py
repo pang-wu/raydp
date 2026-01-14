@@ -13,7 +13,7 @@ def test_spark_master_memory_custom(jdk17_extra_spark_configs):
             "num_cpus": 2,
             "resources": {"master": 10},
             "include_dashboard": True,
-            "dashboard_port": 8270,
+            "dashboard_port": 0,
         },
     )
     ray.init(address=cluster.address)
