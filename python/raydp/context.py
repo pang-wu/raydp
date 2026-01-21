@@ -21,6 +21,7 @@ from threading import RLock
 from typing import Dict, List, Union, Optional
 
 import ray
+import ray.util.client as ray_client
 from pyspark.sql import SparkSession
 
 from ray.util.placement_group import PlacementGroup
@@ -62,6 +63,8 @@ class _SparkContext(ContextDecorator):
                     please install the corresponding spark version first, set ENV SPARK_HOME,
                     configure spark-env.sh HADOOP_CONF_DIR in spark conf, and copy hive-site.xml
                     and hdfs-site.xml to ${SPARK_HOME}/ conf
+    :param fault_tolerant_mode: enable recoverable Spark->Ray conversion by default.
+                              Not supported in Ray client mode.
     :param placement_group_strategy: RayDP will create a placement group according to the
                                      strategy and the configured resources for executors.
                                      If this parameter is specified, the next two
@@ -181,7 +184,7 @@ def init_spark(app_name: str,
                executor_cores: int,
                executor_memory: Union[str, int],
                enable_hive: bool = False,
-               fault_tolerant_mode = False,
+               fault_tolerant_mode = True,
                placement_group_strategy: Optional[str] = None,
                placement_group: Optional[PlacementGroup] = None,
                placement_group_bundle_indexes: Optional[List[int]] = None,
@@ -213,16 +216,8 @@ def init_spark(app_name: str,
         # ray has not initialized, init local
         ray.init()
 
-    if fault_tolerant_mode:
-        print(
-    '''
-    Caution: Fault-tolerant mode is now experimental!
-            This mode CANNOT be used in ray client mode.
-            Use raydp.spark.from_spark_recoverable instead of ray.data.from_spark
-            to make your data recoverable.
-            The spark dataframe converted this way will be cached.
-    '''
-        )
+    if fault_tolerant_mode and ray_client.ray.is_connected():
+        raise Exception("fault_tolerant_mode is not supported in Ray client mode.")
 
     with _spark_context_lock:
         global _global_spark_context

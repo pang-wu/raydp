@@ -32,6 +32,7 @@ from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
 from ray.cluster_utils import Cluster
 import ray.util.client as ray_client
 
+@pytest.mark.parametrize("spark_on_ray_small", ["local"], indirect=True)
 def test_spark(spark_on_ray_small):
     spark = spark_on_ray_small
     result = spark.range(0, 10).count()
@@ -109,6 +110,7 @@ def test_spark_executor_node_affinity(jdk17_extra_spark_configs):
     cluster.shutdown()
 
 
+@pytest.mark.parametrize("ray_cluster", ["local"], indirect=True)
 def test_spark_remote(ray_cluster):
     @ray.remote
     class SparkRemote:
@@ -132,6 +134,7 @@ def test_spark_remote(ray_cluster):
     ray.get(driver.stop.remote())
 
 
+@pytest.mark.parametrize("spark_on_ray_small", ["local"], indirect=True)
 def test_spark_driver_and_executor_hostname(spark_on_ray_small):
     if platform.system() == "Darwin":
         pytest.skip("Skip this test on mac")
@@ -182,6 +185,7 @@ def test_ray_dataset_roundtrip(jdk17_extra_spark_configs):
     cluster.shutdown()
 
 
+@pytest.mark.parametrize("spark_on_ray_2_executors", ["local"], indirect=True)
 def test_ray_dataset_to_spark(spark_on_ray_2_executors):
     # skipping this to be compatible with ray 2.4.0
     # see issue #343
@@ -212,6 +216,7 @@ def test_ray_dataset_to_spark(spark_on_ray_2_executors):
     assert ids == rows2
 
 
+@pytest.mark.parametrize("ray_cluster", ["local"], indirect=True)
 def test_placement_group(ray_cluster, jdk17_extra_spark_configs):
     for pg_strategy in ["PACK", "STRICT_PACK", "SPREAD", "STRICT_SPREAD"]:
         spark = raydp.init_spark(f"test_strategy_{pg_strategy}_1", 1, 1, "500M",
@@ -273,7 +278,7 @@ def test_reconstruction(jdk17_extra_spark_configs):
                              configs=jdk17_extra_spark_configs)
     # Add two nodes, 1 executor each
     node_to_kill = cluster.add_node(num_cpus=1, object_store_memory=10 ** 8)
-    second_node = cluster.add_node(num_cpus=1, object_store_memory=10 ** 8)
+    cluster.add_node(num_cpus=1, object_store_memory=10 ** 8)
     # wait for executors to start
     time.sleep(5)
     # df should be large enough so that result will be put into plasma

@@ -28,14 +28,26 @@ from pyspark.sql.types import StructType
 from pyspark.sql.pandas.types import from_arrow_type
 from pyspark.storagelevel import StorageLevel
 import ray
+from ray._private.client_mode_hook import client_mode_wrap
+try:
+    # Ray cross-language calls require enabling load_code_from_local.
+    # This is an internal Ray API; keep it isolated and optional.
+    from ray._private.worker import global_worker as _ray_global_worker  # type: ignore
+except Exception:  # pragma: no cover
+    _ray_global_worker = None
 from ray.data import Dataset, from_arrow_refs
 from ray.types import ObjectRef
-from ray._private.client_mode_hook import client_mode_wrap
+
 from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
 from raydp.utils import parse_memory_size
 
 
 logger = logging.getLogger(__name__)
+
+def _enable_load_code_from_local() -> None:
+    """Enable Ray cross-language support via internal API (driver only)."""
+    if _ray_global_worker is not None:
+        _ray_global_worker.set_load_code_from_local(True)
 
 @ray.remote(max_retries=-1)
 def _fetch_arrow_table_from_executor(executor_actor_name: str,
@@ -51,6 +63,8 @@ def _fetch_arrow_table_from_executor(executor_actor_name: str,
     NOTE: Calling JVM actors from Python requires Ray cross-language support to be enabled
     https://docs.ray.io/en/latest/ray-core/cross-language.html.
     """
+    # Enable cross-language calls in the task worker before invoking JVM actor methods.
+    _enable_load_code_from_local()
     executor_actor = ray.get_actor(executor_actor_name)
     # cross-language actor call requires a bug fix in ray 2.37.0 to work,
     # https://github.com/ray-project/ray/pull/46770
@@ -137,50 +151,21 @@ def get_raydp_master_owner(spark: Optional[SparkSession] = None) -> PartitionObj
         raydp_master_set_reference_as_state)
 
 
-def _save_spark_df_to_object_store(df: sql.DataFrame, use_batch: bool = True,
-                                   owner: Union[PartitionObjectsOwner, None] = None):
-    # call java function from python
-    jvm = df.sql_ctx.sparkSession.sparkContext._jvm
-    jdf = df._jdf
-    object_store_writer = jvm.org.apache.spark.sql.raydp.ObjectStoreWriter(jdf)
-    if owner is None:
-        # Default to RayDPSparkMaster as the owner if not specified.
-        owner = get_raydp_master_owner(df.sql_ctx.sparkSession)
-    actor_owner_name = owner.actor_name
-    records = object_store_writer.save(use_batch, actor_owner_name)
-
-    # JVM returns List[RecordBatch] where:
-    # - record.ownerAddress() is UTF-8 bytes of the Spark executor (RayDPExecutor) actor name
-    # - record.objectId() is UTF-8 bytes of the batch_key
-    actor_names = [bytes(record.ownerAddress()).decode("utf-8") for record in records]
-    batch_keys = [bytes(record.objectId()).decode("utf-8") for record in records]
-    block_sizes = [record.numRecords() for record in records]
-
-    # Materialize blocks via the owner actor so the owner actor becomes the Ray owner
-    # of the returned Dataset blocks (ObjectRefs), while the blocks are still produced
-    # on (and typically stored on) executor nodes for locality.
-    owner_actor = ray.get_actor(actor_owner_name)
-    blocks = ray.get(owner_actor.fetch_block_refs.remote(actor_names, batch_keys))
-    # Keep refs in owner actor state to prevent owner-side GC from releasing ownership.
-    owner.set_reference_as_state(owner_actor, blocks)
-    return blocks, block_sizes
-
 def spark_dataframe_to_ray_dataset(df: sql.DataFrame,
                                    parallelism: Optional[int] = None,
                                    owner: Union[PartitionObjectsOwner, None] = None):
-    num_part = df.rdd.getNumPartitions()
-    if parallelism is not None:
-        if parallelism != num_part:
-            df = df.repartition(parallelism)
-    blocks, _ = _save_spark_df_to_object_store(df, False, owner)
-    return from_arrow_refs(blocks)
+    """Convert Spark DataFrame to Ray Dataset using the recoverable pipeline by default."""
+    if owner is not None:
+        logger.warning(
+            "spark_dataframe_to_ray_dataset now uses recoverable conversion by default; "
+            "the 'owner' argument is ignored."
+        )
+    return from_spark_recoverable(df, parallelism=parallelism)
 
-# This is an experimental API for now.
-# If you had any issue using it, welcome to report at our github.
-# This function WILL cache/persist the dataframe!
 def from_spark_recoverable(df: sql.DataFrame,
                            storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK,
                            parallelism: Optional[int] = None):
+    """Recoverable Spark->Ray conversion that survives executor loss."""
     num_part = df.rdd.getNumPartitions()
     if parallelism is not None:
         if parallelism != num_part:
@@ -288,7 +273,7 @@ def ray_dataset_to_spark_dataframe(spark: sql.SparkSession,
     locations = get_locations(blocks)
     if hasattr(arrow_schema, "base_schema"):
         arrow_schema = arrow_schema.base_schema
-    if not isinstance(arrow_schema, pa.lib.Schema):
+    if not isinstance(arrow_schema, pa.lib.Schema):  # pylint: disable=c-extension-no-member
         raise RuntimeError(f"Schema is {type(arrow_schema)}, required pyarrow.lib.Schema. \n" \
                             f"to_spark does not support converting non-arrow ray datasets.")
     schema = StructType()

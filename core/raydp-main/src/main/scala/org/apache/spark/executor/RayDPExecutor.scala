@@ -20,7 +20,6 @@ package org.apache.spark.executor
 import java.io.{ByteArrayOutputStream, File}
 import java.nio.channels.Channels
 import java.nio.file.Paths
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 import scala.reflect.classTag
@@ -269,22 +268,6 @@ class RayDPExecutor(
     Ray.exitActor
   }
 
-  /**
-   * Pop (remove and return) a previously stored Arrow IPC stream by key.
-   *
-   * This method is intended to be called from a Python "owner/registry" actor via Ray
-   * cross-language actor calls. Since the Python actor is the caller, Ray will assign
-   * ownership of the returned object to that Python actor.
-   */
-  def popArrowIPC(batchKey: String): Array[Byte] = {
-    val bytes = RayDPExecutor.popArrowIPC(batchKey)
-    if (bytes == null) {
-      throw new RayDPException(
-        s"Missing Arrow IPC bytes for batchKey=$batchKey on executorId=$executorId.")
-    }
-    bytes
-  }
-
   def getBlockLocations(rddId: Int, numPartitions: Int): Array[String] = {
     val env = SparkEnv.get
     val blockIds = (0 until numPartitions).map(i =>
@@ -365,19 +348,5 @@ class RayDPExecutor(
     writeChannel.close
     byteOut.close
     result
-  }
-}
-
-object RayDPExecutor {
-  // Per-executor in-memory buffer for Arrow IPC streams produced by Spark tasks.
-  // Stored in the executor (Ray actor) process; entries are removed by popArrowIPC.
-  private val arrowIpcByKey = new ConcurrentHashMap[String, Array[Byte]]()
-
-  def putArrowIPC(batchKey: String, bytes: Array[Byte]): Unit = {
-    arrowIpcByKey.put(batchKey, bytes)
-  }
-
-  def popArrowIPC(batchKey: String): Array[Byte] = {
-    arrowIpcByKey.remove(batchKey)
   }
 }
