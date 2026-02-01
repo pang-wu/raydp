@@ -310,20 +310,11 @@ class RayDPExecutor(
     env.shutdown
   }
 
-  private def parseExecutorIdFromLocation(loc: String): String = {
-    loc.substring(loc.lastIndexOf('_') + 1)
-  }
-
   /** Refresh the current executor ID that owns a cached Spark block, if any. */
   private def getCurrentBlockOwnerExecutorId(blockId: BlockId): Option[String] = {
     val env = SparkEnv.get
-    val locations = BlockManager.blockIdsToLocations(Array(blockId), env)
-    val locs = locations.getOrElse(blockId, Seq.empty[String])
-    if (locs.nonEmpty) {
-      Some(parseExecutorIdFromLocation(locs.head))
-    } else {
-      None
-    }
+    val locs = env.blockManager.master.getLocations(blockId)
+    if (locs != null && locs.nonEmpty) Some(locs.head.executorId) else None
   }
 
   /**
