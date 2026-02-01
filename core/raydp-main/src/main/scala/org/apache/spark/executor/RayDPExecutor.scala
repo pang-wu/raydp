@@ -274,11 +274,15 @@ class RayDPExecutor(
     val blockIds = (0 until numPartitions).map(i =>
       BlockId.apply("rdd_" + rddId + "_" + i)
     ).toArray
-    val locations = BlockManager.blockIdsToLocations(blockIds, env)
-    var result = new Array[String](numPartitions)
-    for ((key, value) <- locations) {
-      val partitionId = key.name.substring(key.name.lastIndexOf('_') + 1).toInt
-      result(partitionId) = value(0).substring(value(0).lastIndexOf('_') + 1)
+    // Prefer structured locations (BlockManagerId.executorId) over parsing a string representation
+    // of ExecutorCacheTaskLocation. This is more robust across Spark versions.
+    val locsByBlock = env.blockManager.master.getLocations(blockIds)
+    val result = new Array[String](numPartitions)
+    for (i <- 0 until numPartitions) {
+      val locs = locsByBlock(i)
+      if (locs != null && locs.nonEmpty) {
+        result(i) = locs.head.executorId
+      }
     }
     result
   }
@@ -306,20 +310,11 @@ class RayDPExecutor(
     env.shutdown
   }
 
-  private def parseExecutorIdFromLocation(loc: String): String = {
-    loc.substring(loc.lastIndexOf('_') + 1)
-  }
-
   /** Refresh the current executor ID that owns a cached Spark block, if any. */
   private def getCurrentBlockOwnerExecutorId(blockId: BlockId): Option[String] = {
     val env = SparkEnv.get
-    val locations = BlockManager.blockIdsToLocations(Array(blockId), env)
-    val locs = locations.getOrElse(blockId, Seq.empty[String])
-    if (locs.nonEmpty) {
-      Some(parseExecutorIdFromLocation(locs.head))
-    } else {
-      None
-    }
+    val locs = env.blockManager.master.getLocations(blockId)
+    if (locs != null && locs.nonEmpty) Some(locs.head.executorId) else None
   }
 
   /**
@@ -411,8 +406,8 @@ class RayDPExecutor(
     iterator.foreach(writeChannel.write)
     ArrowStreamWriter.writeEndOfStream(writeChannel, new IpcOption)
     val result = byteOut.toByteArray
-    writeChannel.close
-    byteOut.close
+    writeChannel.close()
+    byteOut.close()
     result
   }
 
