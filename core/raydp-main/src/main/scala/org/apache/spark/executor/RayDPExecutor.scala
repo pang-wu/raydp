@@ -376,7 +376,7 @@ class RayDPExecutor(
             // The block may have been (re)cached on a different executor after recache.
             val ownerOpt = getCurrentBlockOwnerExecutorId(blockId)
             ownerOpt match {
-              case Some(ownerSparkExecutorId) if ownerSparkExecutorId != executorId =>
+              case Some(ownerSparkExecutorId) =>
                 val ownerRayExecutorId = resolveRayActorExecutorId(ownerSparkExecutorId)
                 logWarning(
                   s"Cached block $blockId not found on executor $executorId after recache. " +
@@ -393,7 +393,7 @@ class RayDPExecutor(
                       e.getRDDPartitionNoForward(rddId, partitionId, schemaStr, driverAgentUrl))
                   .remote()
                   .get()
-              case Some(_) | None =>
+              case None =>
                 throw new RayDPException("Still cannot get the block after recache!")
             }
           case None =>
