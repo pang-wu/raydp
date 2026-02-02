@@ -394,7 +394,8 @@ class RayDPExecutor(
                   .remote()
                   .get()
               case None =>
-                throw new RayDPException("Still cannot get the block after recache!")
+                throw new RayDPException(
+                  s"Still cannot get block $blockId for RDD $rddId after recache!")
             }
           case None =>
             throw new RayDPException("Still cannot get the block after recache!")
