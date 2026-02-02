@@ -77,6 +77,10 @@ def _fetch_arrow_table_from_executor(executor_actor_name: str,
             rdd_id, partition_id, schema_json, driver_agent_url))
     reader = pa.ipc.open_stream(pa.BufferReader(ipc_bytes))
     table = reader.read_all()
+    # Spark's Arrow conversion may attach schema metadata. Ray Data metadata extraction
+    # can be sensitive to unexpected schema metadata in some Ray/PyArrow combinations.
+    # Strip schema metadata to make blocks more portable/deterministic.
+    table = table.replace_schema_metadata()
     return table
 
 
@@ -166,7 +170,7 @@ def spark_dataframe_to_ray_dataset(df: sql.DataFrame,
     return from_spark_recoverable(df, parallelism=parallelism)
 
 def from_spark_recoverable(df: sql.DataFrame,
-                           storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK,
+                           storage_level: StorageLevel = StorageLevel.DISK_ONLY,
                            parallelism: Optional[int] = None):
     """Recoverable Spark->Ray conversion that survives executor loss."""
     original_df = df

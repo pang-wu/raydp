@@ -155,7 +155,7 @@ Please refer to [NYC Taxi PyTorch Estimator](./examples/pytorch_nyctaxi.py) and 
 
 RayDP now converts Spark DataFrames to Ray Datasets using a recoverable pipeline by default. This makes the resulting Ray Dataset resilient to Spark executor loss (the Arrow IPC bytes are cached in Spark and fetched via Ray tasks with lineage).
 
-The recoverable conversion is also available directly via `raydp.spark.from_spark_recoverable`, and it persists (caches) the Spark DataFrame. You can provide the storage level through the `storage_level` keyword parameter.
+The recoverable conversion is also available directly via `raydp.spark.from_spark_recoverable`, and it persists (caches) the Spark DataFrame. By default it uses disk-only persistence; you can override this via the `storage_level` keyword parameter.
 
 ```python
 import ray
