@@ -383,7 +383,7 @@ class RayDPExecutor(
                     s"Forwarding fetch to executor $ownerSparkExecutorId " +
                     s"(ray actor id $ownerRayExecutorId).")
                 val otherHandle =
-                  Ray.getActor("raydp-executor-" + ownerRayExecutorId).get
+                  Ray.getActor("raydp-executor-" + ownerRayExecutorId).get()
                     .asInstanceOf[ActorHandle[RayDPExecutor]]
                 // One-hop forward only: call no-forward variant on the target executor and
                 // return the Arrow IPC bytes directly.
