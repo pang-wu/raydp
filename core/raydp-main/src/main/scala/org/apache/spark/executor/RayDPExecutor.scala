@@ -367,7 +367,7 @@ class RayDPExecutor(
       case Some(blockResult) =>
         blockResult.data.asInstanceOf[Iterator[Array[Byte]]]
       case None =>
-        logWarning("The cached block has been lost. Cache it again via driver agent")
+        logWarning(s"The cached block $blockId has been lost. Cache it again via driver agent")
         requestRecacheRDD(rddId, driverAgentUrl)
         env.blockManager.get(blockId)(classTag[Array[Byte]]) match {
           case Some(blockResult) =>
@@ -394,7 +394,8 @@ class RayDPExecutor(
                   .remote()
                   .get()
               case None =>
-                throw new RayDPException("Still cannot get the block after recache!")
+                throw new RayDPException(
+                  s"Still cannot get block $blockId for RDD $rddId after recache!")
             }
           case None =>
             throw new RayDPException("Still cannot get the block after recache!")
