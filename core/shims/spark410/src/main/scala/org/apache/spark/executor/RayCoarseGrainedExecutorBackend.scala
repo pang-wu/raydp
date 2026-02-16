@@ -15,23 +15,36 @@
  * limitations under the License.
  */
 
-package com.intel.raydp.shims.spark400
+package org.apache.spark.executor
 
-import com.intel.raydp.shims.{SparkShims, SparkShimDescriptor}
+import java.net.URL
 
-object SparkShimProvider {
-  private val SUPPORTED_PATCHES = 0 to 2
-  val DESCRIPTORS = SUPPORTED_PATCHES.map(p => SparkShimDescriptor(4, 0, p))
-  val DESCRIPTOR_STRINGS = DESCRIPTORS.map(_.toString)
-  val DESCRIPTOR = DESCRIPTORS.head
-}
+import org.apache.spark.SparkEnv
+import org.apache.spark.resource.ResourceProfile
+import org.apache.spark.rpc.RpcEnv
 
-class SparkShimProvider extends com.intel.raydp.shims.SparkShimProvider {
-  def createShim: SparkShims = {
-    new Spark400Shims()
-  }
+class RayCoarseGrainedExecutorBackend(
+    rpcEnv: RpcEnv,
+    driverUrl: String,
+    executorId: String,
+    bindAddress: String,
+    hostname: String,
+    cores: Int,
+    userClassPath: Seq[URL],
+    env: SparkEnv,
+    resourcesFileOpt: Option[String],
+    resourceProfile: ResourceProfile)
+  extends CoarseGrainedExecutorBackend(
+    rpcEnv,
+    driverUrl,
+    executorId,
+    bindAddress,
+    hostname,
+    cores,
+    env,
+    resourcesFileOpt,
+    resourceProfile) {
 
-  def matches(version: String): Boolean = {
-    SparkShimProvider.DESCRIPTOR_STRINGS.contains(version)
-  }
+  override def getUserClassPath: Seq[URL] = userClassPath
+
 }
