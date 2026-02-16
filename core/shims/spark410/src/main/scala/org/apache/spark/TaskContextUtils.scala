@@ -15,23 +15,16 @@
  * limitations under the License.
  */
 
-package com.intel.raydp.shims.spark400
+package org.apache.spark.spark410
 
-import com.intel.raydp.shims.{SparkShims, SparkShimDescriptor}
+import java.util.Properties
 
-object SparkShimProvider {
-  private val SUPPORTED_PATCHES = 0 to 2
-  val DESCRIPTORS = SUPPORTED_PATCHES.map(p => SparkShimDescriptor(4, 0, p))
-  val DESCRIPTOR_STRINGS = DESCRIPTORS.map(_.toString)
-  val DESCRIPTOR = DESCRIPTORS.head
-}
+import org.apache.spark.{SparkEnv, TaskContext, TaskContextImpl}
+import org.apache.spark.memory.TaskMemoryManager
 
-class SparkShimProvider extends com.intel.raydp.shims.SparkShimProvider {
-  def createShim: SparkShims = {
-    new Spark400Shims()
-  }
-
-  def matches(version: String): Boolean = {
-    SparkShimProvider.DESCRIPTOR_STRINGS.contains(version)
+object TaskContextUtils {
+  def getDummyTaskContext(partitionId: Int, env: SparkEnv): TaskContext = {
+    new TaskContextImpl(0, 0, partitionId, -1024, 0, 0,
+        new TaskMemoryManager(env.memoryManager, 0), new Properties(), env.metricsSystem)
   }
 }
