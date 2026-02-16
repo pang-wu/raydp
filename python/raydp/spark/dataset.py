@@ -168,13 +168,9 @@ def spark_dataframe_to_ray_dataset(df: sql.DataFrame,
     return from_spark_recoverable(df, parallelism=parallelism)
 
 def from_spark_recoverable(df: sql.DataFrame,
-                           storage_level: StorageLevel = StorageLevel.DISK_ONLY,
+                           storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK,
                            parallelism: Optional[int] = None):
-    """Recoverable Spark->Ray conversion that survives executor loss.
-
-    By default, the cached Arrow IPC bytes are persisted using disk-only storage to avoid
-    consuming Spark executor memory.
-    """
+    """Recoverable Spark->Ray conversion that survives executor loss."""
     num_part = df.rdd.getNumPartitions()
     if parallelism is not None:
         if parallelism != num_part:
@@ -220,6 +216,20 @@ def from_spark_recoverable(df: sql.DataFrame,
         )
 
     return from_arrow_refs(refs)
+
+def release_recoverable_rdd(spark: sql.SparkSession, rdd_id: int) -> None:
+    """Release the pinned Spark RDD created by ``from_spark_recoverable``.
+
+    After all Ray tasks have finished consuming the dataset, call this to
+    unpersist the cached Arrow IPC bytes and free the strong JVM reference.
+    If not called, the RDD is released automatically when the SparkContext stops.
+
+    Args:
+        spark: The active SparkSession.
+        rdd_id: The RDD id returned by ``RecoverableRDDInfo.rddId()``.
+    """
+    sc = spark.sparkContext
+    sc._jvm.org.apache.spark.sql.raydp.ObjectStoreWriter.releaseRecoverableRDD(rdd_id)
 
 def _convert_by_udf(spark: sql.SparkSession,
                     blocks: List[ObjectRef],
