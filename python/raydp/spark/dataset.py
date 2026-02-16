@@ -170,7 +170,7 @@ def spark_dataframe_to_ray_dataset(df: sql.DataFrame,
     return from_spark_recoverable(df, parallelism=parallelism)
 
 def from_spark_recoverable(df: sql.DataFrame,
-                           storage_level: StorageLevel = StorageLevel.DISK_ONLY,
+                           storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK,
                            parallelism: Optional[int] = None):
     """Recoverable Spark->Ray conversion that survives executor loss."""
     original_df = df
