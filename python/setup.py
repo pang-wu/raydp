@@ -96,7 +96,7 @@ try:
 
     install_requires = [
         "numpy",
-        "pandas >= 1.1.4, < 2.2",
+        "pandas >= 2.2.0, < 3.0.0",
         "psutil",
         "pyarrow >= 4.0.1",
         "ray >= 2.37.0",
