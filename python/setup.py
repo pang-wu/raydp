@@ -133,12 +133,11 @@ try:
         },
         install_requires=install_requires,
         setup_requires=["grpcio-tools"],
-        python_requires='>=3.6',
+        python_requires='>=3.10',
         classifiers=[
             'License :: OSI Approved :: Apache Software License',
             'Programming Language :: Python :: 3.10',
             'Programming Language :: Python :: 3.11',
-            'Programming Language :: Python :: 3.12',
         ]
     )
 finally:
