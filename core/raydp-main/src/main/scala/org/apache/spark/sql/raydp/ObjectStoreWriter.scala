@@ -176,7 +176,7 @@ object ObjectStoreWriter {
     // before Ray tasks fetch them.
     recoverableRDDs.put(rdd.id, rdd)
 
-    var executorIds = df.sqlContext.sparkContext.getExecutorIds.toArray
+    val executorIds = df.sparkSession.sparkContext.getExecutorIds.toArray
     val numExecutors = executorIds.length
     val appMasterHandle = Ray.getActor(RayAppMaster.ACTOR_NAME)
                              .get.asInstanceOf[ActorHandle[RayAppMaster]]
