@@ -13,7 +13,7 @@
   <url>https://github.com/ray-project/raydp.git</url>
 
   <properties>
-    <spark.version>4.0.0</spark.version>
+    <spark.version>3.3.3</spark.version>
     <spark322.version>3.2.2</spark322.version>
     <spark330.version>3.3.0</spark330.version>
     <spark340.version>3.4.0</spark340.version>
@@ -29,8 +29,8 @@
     <ivy.version>2.5.2</ivy.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-    <maven.compiler.source>1.8</maven.compiler.source>
-    <maven.compiler.target>1.8</maven.compiler.target>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
     <scala.version>2.13.12</scala.version>
     <jackson.version>2.18.2</jackson.version>
     <scala.binary.version>2.13</scala.binary.version>
