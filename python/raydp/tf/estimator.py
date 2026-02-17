@@ -175,13 +175,22 @@ class TFEstimator(EstimatorInterface, SparkEstimatorInterface):
             # Model building/compiling need to be within `strategy.scope()`.
             multi_worker_model = TFEstimator.build_and_compile_model(config)
 
+        # Disable auto-sharding since Ray already handles data distribution
+        # across workers. Without this, MultiWorkerMirroredStrategy tries to
+        # re-shard the dataset, producing PerReplica objects that Keras 3.x
+        # cannot convert back to tensors.
+        ds_options = tf.data.Options()
+        ds_options.experimental_distribute.auto_shard_policy = (
+            tf.data.experimental.AutoShardPolicy.OFF
+        )
+
         train_dataset = session.get_dataset_shard("train")
         train_tf_dataset = train_dataset.to_tf(
             feature_columns=config["feature_columns"],
             label_columns=config["label_columns"],
             batch_size=config["batch_size"],
             drop_last=config["drop_last"]
-        )
+        ).with_options(ds_options)
         if config["evaluate"]:
             eval_dataset = session.get_dataset_shard("evaluate")
             eval_tf_dataset = eval_dataset.to_tf(
@@ -189,7 +198,7 @@ class TFEstimator(EstimatorInterface, SparkEstimatorInterface):
                 label_columns=config["label_columns"],
                 batch_size=config["batch_size"],
                 drop_last=config["drop_last"]
-            )
+            ).with_options(ds_options)
         results = []
         callbacks = config["callbacks"]
         for _ in range(config["num_epochs"]):
