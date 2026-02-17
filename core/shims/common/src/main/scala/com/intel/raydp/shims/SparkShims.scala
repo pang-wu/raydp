@@ -43,4 +43,6 @@ trait SparkShims {
   def toArrowSchema(schema : StructType, timeZoneId : String, sparkSession: SparkSession) : Schema
 
   def toArrowBatchRDD(dataFrame: DataFrame): RDD[Array[Byte]]
+
+  def getCommandLineUtilsBridge: CommandLineUtilsBridge
 }

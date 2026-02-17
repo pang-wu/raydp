@@ -25,7 +25,8 @@ import org.apache.spark.sql.spark400.SparkSqlUtils
 import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.spark400.TaskContextUtils
-import com.intel.raydp.shims.{ShimDescriptor, SparkShims}
+import com.intel.raydp.shims.{CommandLineUtilsBridge, ShimDescriptor, SparkShims}
+import org.apache.spark.deploy.spark400.SparkSubmitUtils
 import org.apache.spark.rdd.{MapPartitionsRDD, RDD}
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.arrow.ArrowConverters
@@ -59,5 +60,9 @@ class Spark400Shims extends SparkShims {
 
   override def toArrowBatchRDD(dataFrame: DataFrame): RDD[Array[Byte]] = {
     SparkSqlUtils.toArrowRDD(dataFrame, dataFrame.sparkSession)
+  }
+
+  override def getCommandLineUtilsBridge: CommandLineUtilsBridge = {
+    SparkSubmitUtils
   }
 }

@@ -45,6 +45,6 @@ object SparkSqlUtils {
   }
 
   def toArrowRDD(dataFrame: DataFrame, sparkSession: SparkSession): RDD[Array[Byte]] = {
-    SparkSqlUtils.toArrowRDD(dataFrame, dataFrame.sparkSession)
+    dataFrame.toArrowBatchRdd
   }
 }

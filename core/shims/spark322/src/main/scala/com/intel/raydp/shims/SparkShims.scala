@@ -24,8 +24,9 @@ import org.apache.spark.executor.spark322._
 import org.apache.spark.spark322.TaskContextUtils
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.spark322.SparkSqlUtils
-import com.intel.raydp.shims.{ShimDescriptor, SparkShims}
+import com.intel.raydp.shims.{CommandLineUtilsBridge, ShimDescriptor, SparkShims}
 import org.apache.arrow.vector.types.pojo.Schema
+import org.apache.spark.deploy.spark322.SparkSubmitUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.types.StructType
 
@@ -56,5 +57,9 @@ class Spark322Shims extends SparkShims {
 
   override def toArrowBatchRDD(dataFrame: DataFrame): RDD[Array[Byte]] = {
     SparkSqlUtils.toArrowRDD(dataFrame, dataFrame.sparkSession)
+  }
+
+  override def getCommandLineUtilsBridge: CommandLineUtilsBridge = {
+    SparkSubmitUtils
   }
 }
