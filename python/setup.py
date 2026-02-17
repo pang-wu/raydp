@@ -132,6 +132,10 @@ try:
             'build_proto_modules': CustomBuildPackageProtos,
         },
         install_requires=install_requires,
+        extras_require={
+            "tensorflow": ["tensorflow>=2.15.1,<2.16"],
+            "tensorflow-gpu": ["tensorflow[and-cuda]>=2.15.1,<2.16"],
+        },
         setup_requires=["grpcio-tools"],
         python_requires='>=3.10',
         classifiers=[
