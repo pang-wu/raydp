@@ -986,7 +986,13 @@ private[spark] object InProcessSparkSubmit {
 
 }
 
-object SparkSubmit extends CommandLineUtils with Logging {
+object SparkSubmit extends Logging {
+
+  // Inlined from CommandLineLoggingUtils to avoid binary incompatibility
+  // between Spark 4.0.x (exitFn: Int => Unit) and 4.1.x (exitFn: (Int, Option[Throwable]) => Unit)
+  private[spark] var exitFn: Int => Unit = (exitCode: Int) => System.exit(exitCode)
+  private[spark] var printStream: PrintStream = System.err
+  private[spark] def printMessage(str: String): Unit = printStream.println(str)
 
   // Cluster managers
   private val YARN = 1
