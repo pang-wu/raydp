@@ -15,7 +15,7 @@
 # limitations under the License.
 import logging
 import uuid
-from typing import Callable, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 from dataclasses import dataclass
 
 from packaging import version
@@ -43,6 +43,8 @@ from raydp.utils import parse_memory_size
 
 
 logger = logging.getLogger(__name__)
+
+_recoverable_rdd_ids: Dict[sql.DataFrame, int] = {}
 
 def _enable_load_code_from_local() -> None:
     """Enable Ray cross-language support via internal API (driver only)."""
@@ -171,6 +173,7 @@ def from_spark_recoverable(df: sql.DataFrame,
                            storage_level: StorageLevel = StorageLevel.MEMORY_AND_DISK,
                            parallelism: Optional[int] = None):
     """Recoverable Spark->Ray conversion that survives executor loss."""
+    original_df = df
     num_part = df.rdd.getNumPartitions()
     if parallelism is not None:
         if parallelism != num_part:
@@ -183,6 +186,7 @@ def from_spark_recoverable(df: sql.DataFrame,
     # - build Ray Dataset blocks via Ray tasks (lineage), each task refetches bytes via JVM actors
     info = object_store_writer.prepareRecoverableRDD(df._jdf, storage_level)
     rdd_id = info.rddId()
+    _recoverable_rdd_ids[original_df] = rdd_id
     num_partitions = info.numPartitions()
     schema_json = info.schemaJson()
     driver_agent_url = info.driverAgentUrl()
@@ -217,7 +221,7 @@ def from_spark_recoverable(df: sql.DataFrame,
 
     return from_arrow_refs(refs)
 
-def release_recoverable_rdd(spark: sql.SparkSession, rdd_id: int) -> None:
+def release_spark_recoverable(df: sql.DataFrame) -> None:
     """Release the pinned Spark RDD created by ``from_spark_recoverable``.
 
     After all Ray tasks have finished consuming the dataset, call this to
@@ -225,11 +229,12 @@ def release_recoverable_rdd(spark: sql.SparkSession, rdd_id: int) -> None:
     If not called, the RDD is released automatically when the SparkContext stops.
 
     Args:
-        spark: The active SparkSession.
-        rdd_id: The RDD id returned by ``RecoverableRDDInfo.rddId()``.
+        df: The same DataFrame that was passed to ``from_spark_recoverable``.
     """
-    sc = spark.sparkContext
-    sc._jvm.org.apache.spark.sql.raydp.ObjectStoreWriter.releaseRecoverableRDD(rdd_id)
+    rdd_id = _recoverable_rdd_ids.pop(df, None)
+    if rdd_id is not None:
+        sc = df.sql_ctx.sparkSession.sparkContext
+        sc._jvm.org.apache.spark.sql.raydp.ObjectStoreWriter.releaseRecoverableRDD(rdd_id)
 
 def _convert_by_udf(spark: sql.SparkSession,
                     blocks: List[ObjectRef],

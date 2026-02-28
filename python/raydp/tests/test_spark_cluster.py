@@ -333,10 +333,8 @@ def test_recoverable_survives_gc(jdk17_extra_spark_configs):
     cluster.shutdown()
 
 
-def test_release_recoverable_rdd(jdk17_extra_spark_configs):
-    """Verify that releaseRecoverableRDD unpersists the pinned RDD."""
-    from pyspark.storagelevel import StorageLevel
-
+def test_release_spark_recoverable(jdk17_extra_spark_configs):
+    """Verify that release_spark_recoverable unpersists the pinned RDD."""
     cluster = Cluster(
         initialize_head=True,
         head_node_args={
@@ -348,20 +346,20 @@ def test_release_recoverable_rdd(jdk17_extra_spark_configs):
         "test_release", 1, 1, "500M", configs=jdk17_extra_spark_configs)
 
     df = spark.range(100)
-    sc = spark.sparkContext
-    object_store_writer = sc._jvm.org.apache.spark.sql.raydp.ObjectStoreWriter
-    storage_level = sc._getJavaStorageLevel(StorageLevel.MEMORY_AND_DISK)
-    info = object_store_writer.prepareRecoverableRDD(df._jdf, storage_level)
-    rdd_id = info.rddId()
+    ds = raydp.spark.from_spark_recoverable(df)
 
-    # RDD should be in persistent RDDs
+    sc = spark.sparkContext
+    # Look up the rdd_id that was tracked internally
+    from raydp.spark.dataset import _recoverable_rdd_ids
+    rdd_id = _recoverable_rdd_ids[df]
     assert sc._jsc.sc().getPersistentRDDs().contains(rdd_id)
 
-    # Release it
-    object_store_writer.releaseRecoverableRDD(rdd_id)
+    # Release via the public API
+    raydp.spark.release_spark_recoverable(df)
 
     # After release, the RDD should no longer be persisted
     assert not sc._jsc.sc().getPersistentRDDs().contains(rdd_id)
+    assert df not in _recoverable_rdd_ids
 
     raydp.stop_spark()
     ray.shutdown()
