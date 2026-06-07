@@ -34,6 +34,7 @@ object SparkSqlUtils {
       session: SparkSession): DataFrame = {
     val schema = DataType.fromJson(schemaString).asInstanceOf[StructType]
     val timeZoneId = session.sessionState.conf.sessionLocalTimeZone
+    val largeVarTypes = session.sessionState.conf.arrowUseLargeVarTypes
     val internalRowRdd = arrowBatchRDD.rdd.mapPartitions { iter =>
       val context = TaskContext.get()
       ArrowConverters.fromBatchIterator(
@@ -41,7 +42,7 @@ object SparkSqlUtils {
         schema = schema,
         timeZoneId = timeZoneId,
         errorOnDuplicatedFieldNames = false,
-        largeVarTypes = false,
+        largeVarTypes = largeVarTypes,
         context = context)
     }
     session.internalCreateDataFrame(internalRowRdd.setName("arrow"), schema)
