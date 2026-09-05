@@ -90,9 +90,9 @@ Spark features such as dynamic resource allocation, spark-submit script, etc are
 
 ## Spark + AI Pipeline on Ray
 
-RayDP provides APIs for converting a Spark DataFrame to a Ray Dataset which can be consumed by XGBoost, Ray Train, Horovod on Ray, etc. RayDP also provides high level scikit-learn style Estimator APIs for distributed training with PyTorch or Tensorflow. To get started with end-to-end Spark + AI pipeline, the easiest way is to run the following tutorials on Google Collab. More examples are also available in the `examples` folder.
-* [Spark + Ray Train Tutorial on Google Collab](https://colab.research.google.com/github/ray-project/raydp/blob/master/tutorials/raytrain_example.ipynb)
-* [Spark + TorchEstimator Tutorial on Google Collab](https://colab.research.google.com/github/ray-project/raydp/blob/master/tutorials/pytorch_example.ipynb)
+RayDP provides APIs for converting a Spark DataFrame to a Ray Dataset which can be consumed by XGBoost, Ray Train, Horovod on Ray, etc. RayDP also provides high level scikit-learn style Estimator APIs for distributed training with PyTorch or Tensorflow. To get started with end-to-end Spark + AI pipeline, the easiest way is to run the following tutorials on Google Colab. More examples are also available in the `examples` folder.
+* [Spark + Ray Train Tutorial on Google Colab](https://colab.research.google.com/github/ray-project/raydp/blob/master/tutorials/raytrain_example.ipynb)
+* [Spark + TorchEstimator Tutorial on Google Colab](https://colab.research.google.com/github/ray-project/raydp/blob/master/tutorials/pytorch_example.ipynb)
 
 
 ***Spark DataFrame & Ray Dataset conversion***

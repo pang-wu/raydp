@@ -82,7 +82,9 @@ jobs:
           else
             pip install torch
           fi
-          pip install pyarrow "ray[train,default]==${{ matrix.ray-version }}" tqdm pytest tabulate grpcio-tools wget
+          # TensorFlow 2.15 installs protobuf 4.x, so keep Google API protos compatible.
+          pip install pyarrow "ray[train,default]==${{ matrix.ray-version }}" \
+            "googleapis-common-protos==1.75.0" tqdm pytest tabulate grpcio-tools wget
           pip install "xgboost_ray[default]<=0.1.13"
           pip install "xgboost<=2.0.3"
           pip install torchmetrics
@@ -98,6 +100,7 @@ jobs:
           pip install pyspark==${{ matrix.spark-version }}
           ./build.sh
           pip install "$(ls dist/raydp-*.whl)[tensorflow]"
+          python -c "from google.rpc import code_pb2"
       - name: Lint
         run: |
           pip install pylint==3.2.7
