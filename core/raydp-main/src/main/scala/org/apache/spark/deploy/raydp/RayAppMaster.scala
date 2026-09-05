@@ -46,7 +46,6 @@ class RayAppMaster(host: String,
   private var endpoint: RpcEndpointRef = _
   private var rpcEnv: RpcEnv = _
   private val conf: SparkConf = new SparkConf()
-  private val restartedExecutors = new HashMap[String, String]()
 
   init()
 
@@ -71,7 +70,8 @@ class RayAppMaster(host: String,
       numUsableCores = 0,
       clientMode = false)
     // register endpoint
-    endpoint = rpcEnv.setupEndpoint(RayAppMaster.ENDPOINT_NAME, new RayAppMasterEndpoint(rpcEnv))
+    val appMasterEndpoint = new RayAppMasterEndpoint(rpcEnv)
+    endpoint = rpcEnv.setupEndpoint(RayAppMaster.ENDPOINT_NAME, appMasterEndpoint)
   }
 
   /**
@@ -82,7 +82,14 @@ class RayAppMaster(host: String,
     RpcEndpointAddress(rpcEnv.address, RayAppMaster.ENDPOINT_NAME).toString
   }
 
-  def getRestartedExecutors(): java.util.Map[String, String] = restartedExecutors.asJava
+  def getRestartedExecutors(): java.util.Map[String, String] = {
+    val endpointRef = endpoint
+    if (endpointRef == null) {
+      Map.empty[String, String].asJava
+    } else {
+      endpointRef.askSync[Map[String, String]](GetRestartedExecutors).asJava
+    }
+  }
 
   /**
    * This is used to represent the Spark on Ray cluster URL.
@@ -171,13 +178,13 @@ class RayAppMaster(host: String,
         appInfo.markExecutorStarted(executorId, context.senderAddress)
         context.reply(true)
 
+      case GetRestartedExecutors =>
+        context.reply(if (appInfo == null) Map.empty else appInfo.getRestartedExecutors)
+
       case RequestExecutors(appId, requestedTotal) =>
         assert(appInfo != null && appInfo.id == appId)
-        if (requestedTotal > appInfo.currentExecutors()) {
-          (0 until (requestedTotal - appInfo.currentExecutors())).foreach{ _ =>
-            requestNewExecutor()
-          }
-        }
+        appInfo.updateDesiredExecutors(requestedTotal)
+        reconcileExecutors()
         context.reply(true)
 
       case KillExecutors(appId, executorIds) =>
@@ -188,25 +195,25 @@ class RayAppMaster(host: String,
             success = false
           }
         }
+        reconcileExecutors()
         context.reply(success)
 
-      case RequestAddPendingRestartedExecutor(executorId) =>
-        if (appInfo.remainingUnRegisteredExecutors > 0) {
-          val cores = appInfo.desc.coresPerExecutor.getOrElse(1)
-          val memory = appInfo.desc.memoryPerExecutorMB
-          // ray actor will restart using the old ID
-          val handlerOpt = Ray.getActor("raydp-executor-" + executorId)
-          if (!handlerOpt.isPresent) {
-            context.reply(AddPendingRestartedExecutorReply(None))
-          } else {
-            val newExecutorId = s"${appInfo.getNextExecutorId()}"
-            val handler = handlerOpt.get.asInstanceOf[ActorHandle[RayDPExecutor]]
-            appInfo.addPendingRegisterExecutor(newExecutorId, handler, cores, memory)
-            restartedExecutors(newExecutorId) = executorId
-            context.reply(AddPendingRestartedExecutorReply(Some(newExecutorId)))
-          }
-        } else {
+      case RequestAddPendingRestartedExecutor(actorId) =>
+        val cores = appInfo.desc.coresPerExecutor.getOrElse(1)
+        val memory = appInfo.desc.memoryPerExecutorMB
+        // ray actor will restart using the old ID
+        val handlerOpt = Ray.getActor("raydp-executor-" + actorId)
+        if (!handlerOpt.isPresent) {
           context.reply(AddPendingRestartedExecutorReply(None))
+        } else if (!appInfo.actorSlots.contains(actorId)) {
+          // The actor may still be visible in Ray after Spark has scaled the slot down.
+          // Do not allow a late restart request to recreate a removed executor.
+          context.reply(AddPendingRestartedExecutorReply(None))
+        } else {
+          val newExecutorId = s"${appInfo.getNextExecutorId()}"
+          val handler = handlerOpt.get.asInstanceOf[ActorHandle[RayDPExecutor]]
+          appInfo.addPendingRegisterExecutor(newExecutorId, actorId, handler, cores, memory)
+          context.reply(AddPendingRestartedExecutorReply(Some(newExecutorId)))
         }
     }
 
@@ -224,7 +231,8 @@ class RayAppMaster(host: String,
     }
 
     private def createApplication(
-        desc: ApplicationDescription, driver: RpcEndpointRef): ApplicationInfo = {
+        desc: ApplicationDescription,
+        driver: RpcEndpointRef): ApplicationInfo = {
       val now = System.currentTimeMillis()
       val date = new Date(now)
       val appId = newApplicationId(date)
@@ -250,8 +258,15 @@ class RayAppMaster(host: String,
     }
 
     private def schedule(): Unit = {
-      val desc = appInfo.desc
-      for (_ <- 0 until desc.numExecutors) {
+      reconcileExecutors()
+    }
+
+    private def reconcileExecutors(): Unit = {
+      // Reconcile against Ray actor slots, not registered Spark executor generations.
+      // Restarted actors keep the same slot and only receive a new Spark executor id.
+      // DesiredExecutors is the single source of truth and the only bound on actor provisioning.
+      // So any future bug in spark's desiredExecutors tracking could provision unbounded actors.
+      (0 until appInfo.numActorsToAdd).foreach { _ =>
         requestNewExecutor()
       }
     }
@@ -271,23 +286,6 @@ class RayAppMaster(host: String,
             .map { case (name, amount) => s"$name: $amount" }.mkString(", ")} }..")
       // TODO: Support generic fractional logical resources using prefix spark.ray.actor.resource.*
 
-      // This will check with dynamic auto scale no additional pending executor actor added more
-      // than max executors count as this result in executor even running after job completion
-      val dynamicAllocationEnabled = conf.getBoolean("spark.dynamicAllocation.enabled", false)
-      // FIX: Check total executors (current + restarted) against maxExecutor, executorInstances
-      if (dynamicAllocationEnabled) {
-        val maxExecutor = conf.getInt("spark.dynamicAllocation.maxExecutors", 0)
-        if ((appInfo.executors.size + restartedExecutors.size) >= maxExecutor) {
-          return
-        }
-      } else {
-        val executorInstances = conf.getInt("spark.executor.instances", 0)
-        if (executorInstances != 0 &&
-          (appInfo.executors.size + restartedExecutors.size) >= executorInstances) {
-          return
-        }
-      }
-
       val handler = RayExecutorUtils.createExecutorActor(
         executorId,
         getAppMasterEndpointUrl(),
@@ -300,7 +298,9 @@ class RayAppMaster(host: String,
         placementGroup,
         getNextBundleIndex,
         appInfo.desc.command.javaOpts.asJava)
-      appInfo.addPendingRegisterExecutor(executorId, handler, sparkCoresPerExecutor, memory)
+      // A newly created Ray actor uses the same id for its actor slot and first Spark executor.
+      appInfo.addPendingRegisterExecutor(
+        executorId, executorId, handler, sparkCoresPerExecutor, memory)
     }
 
     private def appendActorClasspath(javaOpts: Seq[String]): Seq[String] = {

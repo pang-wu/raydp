@@ -83,14 +83,17 @@ class RayDPExecutor(
     // Check if this actor is restarted
     val ifRestarted = Ray.getRuntimeContext.wasCurrentActorRestarted
     if (ifRestarted) {
+      // executorId still holds the original Ray actor name before reassignment below.
+      val originalActorId = executorId
       val reply = appMaster.askSync[AddPendingRestartedExecutorReply](
-          RequestAddPendingRestartedExecutor(executorId))
+          RequestAddPendingRestartedExecutor(originalActorId))
       // this executor might be restarted, use the returned new id and register self
       if (!reply.newExecutorId.isEmpty) {
-        logInfo(s"Executor: ${executorId} seems to be restarted, registering using new id")
+        logInfo(s"Executor: ${originalActorId} seems to be restarted, registering using new id")
         executorId = reply.newExecutorId.get
       } else {
-        throw new RuntimeException(s"Executor ${executorId} restarted, but getActor failed.")
+        throw new RuntimeException(
+          s"Executor ${originalActorId} restarted, but getActor failed.")
       }
     }
     val registeredResult = appMaster.askSync[Boolean](RegisterExecutor(executorId, nodeIp))

@@ -32,11 +32,20 @@ import org.apache.spark.rpc.{RpcAddress, RpcEndpointRef}
 
 case class ExecutorDesc(
     executorId: String,
+    // Ray actors keep their original actor id across restarts, while Spark assigns a new
+    // executor id for each restarted executor generation.
+    actorId: String,
     cores: Int,
     memoryPerExecutorMB: Int,
     resources: Map[String, ResourceInformation]) {
   var registered: Boolean = false
+  var address: Option[RpcAddress] = None
 }
+
+private[spark] class ExecutorActorSlot(
+    var handle: ActorHandle[RayDPExecutor],
+    var currentExecutorId: Option[String],
+    var previousExecutorId: Option[String])
 
 private[spark] class ApplicationInfo(
     val startTime: Long,
@@ -49,13 +58,16 @@ private[spark] class ApplicationInfo(
   var state: ApplicationState.Value = _
   var executors: HashMap[String, ExecutorDesc] = _
   var addressToExecutorId: HashMap[RpcAddress, String] = _
-  var executorIdToHandler: HashMap[String, ActorHandle[RayDPExecutor]] = _
+  // Resolves both current executor ids and the previous-generation tombstone to an actor slot.
+  var executorIdToActorId: HashMap[String, String] = _
+  var actorSlots: HashMap[String, ExecutorActorSlot] = _
   var removedExecutors: ArrayBuffer[ExecutorDesc] = _
   var coresGranted: Int = _
   var endTime: Long = _
   private var nextExecutorId: Int = _
-  // this only count those registered executors and minus removed executors
-  private var registeredExecutors: Int = 0
+  // Desired executor target comes from the Spark driver. Actor handles track the Ray actor
+  // slots AppMaster still owns, independent of transient Spark executor generations.
+  private var desiredExecutors: Int = _
 
   init()
 
@@ -63,20 +75,47 @@ private[spark] class ApplicationInfo(
     state = ApplicationState.WAITING
     executors = new HashMap[String, ExecutorDesc]
     addressToExecutorId = new HashMap[RpcAddress, String]
-    executorIdToHandler = new HashMap[String, ActorHandle[RayDPExecutor]]
+    executorIdToActorId = new HashMap[String, String]
+    actorSlots = new HashMap[String, ExecutorActorSlot]
     endTime = -1L
     nextExecutorId = 0
+    desiredExecutors = desc.numExecutors
     removedExecutors = new ArrayBuffer[ExecutorDesc]
   }
 
   def addPendingRegisterExecutor(
       executorId: String,
+      actorId: String,
       handler: ActorHandle[RayDPExecutor],
       cores: Int,
       memoryInMB: Int): Unit = {
-    val desc = ExecutorDesc(executorId, cores, memoryInMB, null)
+    // Adding a pending executor also declares that its Ray actor slot is still active.
+    // For restarted executors, actorId points back to the original named Ray actor.
+    val slot = actorSlots.getOrElseUpdate(
+      actorId, new ExecutorActorSlot(handler, None, None))
+    slot.handle = handler
+    slot.currentExecutorId = Some(executorId)
+    val desc = ExecutorDesc(executorId, actorId, cores, memoryInMB, null)
     executors(executorId) = desc
-    executorIdToHandler(executorId) = handler
+    // Keep the previous generation mapping until the next disconnect or explicit actor shutdown.
+    executorIdToActorId(executorId) = actorId
+  }
+
+  def updateDesiredExecutors(numExecutors: Int): Unit = {
+    desiredExecutors = math.max(0, numExecutors)
+  }
+
+  def numActorsToAdd: Int = {
+    math.max(0, desiredExecutors - actorSlots.size)
+  }
+
+  // Compatibility view for ObjectStoreWriter: map restarted Spark executor ids back to
+  // the original Ray actor ids used in named actor lookup.
+  def getRestartedExecutors: Map[String, String] = {
+    executors.collect {
+      case (executorId, desc) if desc.actorId != executorId =>
+        executorId -> desc.actorId
+    }.toMap
   }
 
   def registerExecutor(executorId: String): Boolean = {
@@ -86,7 +125,6 @@ private[spark] class ApplicationInfo(
         false
       } else {
         executors(executorId).registered = true
-        registeredExecutors += 1
         true
       }
     } else {
@@ -96,56 +134,91 @@ private[spark] class ApplicationInfo(
   }
 
   def markExecutorStarted(executorId: String, address: RpcAddress): Unit = {
-    addressToExecutorId(address) = executorId
+    executors.get(executorId).foreach { exec =>
+      exec.address = Some(address)
+      addressToExecutorId(address) = executorId
+    }
   }
 
   def kill(address: RpcAddress, shutdownActor: Boolean): Boolean = {
-    if (addressToExecutorId.contains(address)) {
-      kill(addressToExecutorId(address), shutdownActor)
-    } else {
-      false
-    }
+    addressToExecutorId.get(address).exists(kill(_, shutdownActor))
   }
 
   def kill(executorId: String, shutdownActor: Boolean): Boolean = {
-    if (executors.contains(executorId)) {
-      val exec = executors(executorId)
-      if (exec.registered) {
-        registeredExecutors -= 1
-      }
-      removedExecutors += executors(executorId)
-      executors -= executorId
-      coresGranted -= exec.cores
+    val actorIdOpt = executorIdToActorId.get(executorId)
+
+    actorIdOpt.foreach { actorId =>
       if (shutdownActor) {
-        // Previously we used to exitExecutor for all scenarios, but it will cause
-        // the following issue when a executor is down because of OOM issue:
-        // - Executor E1 dies at T0 lets say because of OOm
-        // - We try to kill it by firing stop call on E1 actor
-        // - Since the actor is not available, the stop task fails for E1
-        // - In the mean while, ray brings up the lost executor E1
-        // - The failed task (stop task) gets retried as there are task retries configured.
-        // - The stop task gets fired on the new executor which got recovered
-        // - The Recovered executor exits with status as user intended exit.
-        RayExecutorUtils.exitExecutor(executorIdToHandler(executorId))
+        // One pass over the slot decides whether it survives this kill.
+        actorSlots.updateWith(actorId) {
+          // A tombstone whose actor has already re-registered refers to a generation Spark itself
+          // removed on disconnect. Spark tracks the newer generation as a separate executor, so a
+          // late kill for the retired id must not terminate it: drop only the tombstone and keep
+          // the slot so Spark can kill that generation through its own executor id.
+          case Some(slot) if slot.currentExecutorId.exists(_ != executorId) =>
+            executorIdToActorId.remove(executorId)
+            if (slot.previousExecutorId.contains(executorId)) {
+              slot.previousExecutorId = None
+            }
+            Some(slot)
+          // Otherwise no live generation remains, so retire every generation mapped to the actor
+          // and release the slot.
+          case slotOpt =>
+            val executorIds = slotOpt.map { slot =>
+              Set(executorId) ++ slot.currentExecutorId ++ slot.previousExecutorId
+            }.getOrElse(Set(executorId))
+            executorIds.foreach { id =>
+              removeExecutorGeneration(id)
+              executorIdToActorId.remove(id)
+            }
+            // Only explicit Spark/AppMaster shutdown releases the Ray actor slot. A disconnect
+            // caused by actor failure keeps the slot so Ray can restart it and register a new
+            // executor id.
+            // Previously we used to exitExecutor for all scenarios, but it will cause
+            // the following issue when a executor is down because of OOM issue:
+            // - Executor E1 dies at T0 lets say because of OOm
+            // - We try to kill it by firing stop call on E1 actor
+            // - Since the actor is not available, the stop task fails for E1
+            // - In the mean while, ray brings up the lost executor E1
+            // - The failed task (stop task) gets retried as there are task retries configured.
+            // - The stop task gets fired on the new executor which got recovered
+            // - The Recovered executor exits with status as user intended exit.
+            slotOpt.foreach(slot => exitExecutorActor(slot.handle))
+            None
+        }
+      } else {
+        removeExecutorGeneration(executorId)
+        actorSlots.get(actorId).foreach { slot =>
+          if (slot.currentExecutorId.contains(executorId)) {
+            // Replace the older tombstone so restart history stays bounded to one generation.
+            slot.previousExecutorId.foreach(executorIdToActorId.remove)
+            slot.currentExecutorId = None
+            slot.previousExecutorId = Some(executorId)
+          }
+        }
+        executorIdToActorId(executorId) = actorId
       }
-      executorIdToHandler -= executorId
-      true
-    } else {
-      false
     }
+    actorIdOpt.isDefined
+  }
+
+  private def removeExecutorGeneration(executorId: String): Unit = {
+    executors.remove(executorId).foreach { exec =>
+      removedExecutors += exec
+      coresGranted -= exec.cores
+      exec.address.foreach(addressToExecutorId.remove)
+    }
+  }
+
+  // Visible for testing. Shutting an executor down needs a live Ray actor handle, which unit
+  // tests cannot construct, so the Ray call is isolated behind this method.
+  protected def exitExecutorActor(handle: ActorHandle[RayDPExecutor]): Unit = {
+    RayExecutorUtils.exitExecutor(handle)
   }
 
   def getExecutorHandler(
       executorId: String): Option[ActorHandle[RayDPExecutor]] = {
-    executorIdToHandler.get(executorId)
-  }
-
-  def remainingUnRegisteredExecutors(): Int = {
-    desc.numExecutors - registeredExecutors
-  }
-
-  def currentExecutors(): Int = {
-    registeredExecutors
+    executorIdToActorId.get(executorId).flatMap(actorSlots.get).map(_.handle)
   }
 
   def getNextExecutorId(): Int = {

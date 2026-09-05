@@ -32,6 +32,18 @@ from raydp.spark.ray_cluster_master import RAYDP_SPARK_MASTER_SUFFIX
 from ray.cluster_utils import Cluster
 import ray.util.client as ray_client
 
+
+def _wait_for(value_fn, condition, timeout=60):
+    deadline = time.monotonic() + timeout
+    value = None
+    while time.monotonic() < deadline:
+        value = value_fn()
+        if condition(value):
+            return value
+        time.sleep(0.5)
+    raise AssertionError(f"Condition not met within {timeout}s; last value: {value!r}")
+
+
 @pytest.mark.parametrize("spark_on_ray_small", ["local"], indirect=True)
 def test_spark(spark_on_ray_small):
     spark = spark_on_ray_small
@@ -364,6 +376,141 @@ def test_release_spark_recoverable(jdk17_extra_spark_configs):
     raydp.stop_spark()
     ray.shutdown()
     cluster.shutdown()
+
+
+def test_restarted_executor_does_not_block_scale_up(jdk17_extra_spark_configs):
+    """Request three executors after one of the original two executor actors restarts.
+
+    The pre-fix backend counts restart history as another actor slot and remains at two.
+    The fixed backend creates one new actor and reaches three.
+    """
+    cluster = Cluster(initialize_head=True, head_node_args={"num_cpus": 1})
+    spark = None
+    try:
+        ray.init(address=cluster.address, include_dashboard=False)
+        worker_args = {
+            "num_cpus": 1,
+            "object_store_memory": 10 ** 8,
+            "resources": {"spark_executor": 1},
+        }
+
+        configs = {
+            "spark.dynamicAllocation.enabled": "true",
+            "spark.dynamicAllocation.minExecutors": "2",
+            "spark.dynamicAllocation.initialExecutors": "2",
+            "spark.dynamicAllocation.maxExecutors": "3",
+            # Satisfy Spark's dynamic-allocation validation without an external shuffle service.
+            "spark.dynamicAllocation.shuffleTracking.enabled": "true",
+            # Keep requestTotalExecutors() enabled, but stop EAM from replacing the target of 3.
+            "spark.dynamicAllocation.testing": "true",
+            "spark.testing.dynamicAllocation.schedule.enabled": "false",
+            "spark.ray.raydp_spark_executor.actor.resource.spark_executor": "1",
+            **jdk17_extra_spark_configs,
+        }
+        spark = raydp.init_spark("test_restart_scale_up", 2, 1, "500M", configs=configs)
+        jsc = spark.sparkContext._jsc.sc()
+
+        # The pre-fix backend only counts registered executors when handling Spark's initial
+        # target of 2, so it can create a third actor while RayDP's two initial actors are still
+        # pending. Record the named actors before adding executor resources.
+        actor_prefix = "raydp-executor-"
+        actor_ids = {
+            name[len(actor_prefix):]
+            for name in ray.util.list_named_actors()
+            if name.startswith(actor_prefix)
+        }
+        assert actor_ids in ({"0", "1"}, {"0", "1", "2"})
+
+        # An extra actor must register before being removed through Spark,
+        # which cleans both its Ray actor and AppMaster executor state.
+        for _ in range(3):
+            cluster.add_node(**worker_args)
+
+        def executor_ids():
+            ids = jsc.getExecutorIds()
+            return {ids.apply(i) for i in range(ids.size())}
+
+        initial_ids = _wait_for(executor_ids, lambda ids: len(ids) == len(actor_ids))
+        if len(initial_ids) == 3:
+            extra_id = max(initial_ids, key=int)
+            # remove the extra actor 
+            assert jsc.killAndReplaceExecutor(extra_id)
+            initial_ids = _wait_for(
+                executor_ids,
+                lambda ids: len(ids) == 2 and extra_id not in ids,
+            )
+
+        # Restart one of the two intended actors. With no normal actor left pending, the executor
+        # count returning to 2 means the failed actor has registered with a new Spark executor ID.
+        victim_id = next(iter(initial_ids))
+        ray.kill(ray.get_actor(f"{actor_prefix}{victim_id}"), no_restart=False)
+        _wait_for(
+            executor_ids,
+            lambda ids: len(ids) == 2 and victim_id not in ids,
+        )
+
+        empty_java_map = spark._jvm.java.util.HashMap()
+        empty_scala_map = spark._jvm.org.apache.spark.api.python.PythonUtils.toScalaMap(
+            empty_java_map)
+        # Assert that Spark accepts a total target of 3. Zero and the empty map only mean that the
+        # request has no locality hints; they do not change the requested executor count.
+        assert jsc.requestTotalExecutors(3, 0, empty_scala_map)
+        # Functional regression check: the pre-fix backend remains at 2 and times out, while the
+        # fixed backend reaches 3.
+        _wait_for(executor_ids, lambda ids: len(ids) == 3)
+    finally:
+        if spark is not None:
+            raydp.stop_spark()
+        ray.shutdown()
+        cluster.shutdown()
+
+
+def test_kill_and_replace_executor_reconciles_desired_count(jdk17_extra_spark_configs):
+    """Kill one of two executors and verify that a different executor restores the count to two.
+
+    The pre-fix backend removes the victim and stays at one. The fixed backend reconciles the
+    desired count by creating a replacement and returning to two.
+    """
+    cluster = Cluster(initialize_head=True, head_node_args={"num_cpus": 1})
+    spark = None
+    try:
+        ray.init(address=cluster.address, include_dashboard=False)
+        # Provide exactly two executor slots. Killing one frees all resources needed to replace it.
+        cluster.add_node(
+            num_cpus=2,
+            object_store_memory=10 ** 8,
+            resources={"spark_executor": 2},
+        )
+        configs = {
+            "spark.ray.raydp_spark_executor.actor.resource.spark_executor": "1",
+            **jdk17_extra_spark_configs,
+        }
+        spark = raydp.init_spark(
+            "test_kill_and_replace", 2, 1, "500M", configs=configs)
+        jsc = spark.sparkContext._jsc.sc()
+
+        def executor_ids():
+            ids = jsc.getExecutorIds()
+            return {ids.apply(i) for i in range(ids.size())}
+
+        # Verify that both requested executors are registered, then select one ID to replace.
+        initial_ids = _wait_for(executor_ids, lambda ids: len(ids) == 2)
+        victim_id = next(iter(initial_ids))
+
+        # Assert that Spark accepts the kill-and-replace request. The following wait requires both
+        # count == 2 and victim removal: the pre-fix backend times out at 1, while the fixed backend
+        # returns with a new ID.
+        assert jsc.killAndReplaceExecutor(victim_id)
+        replacement_ids = _wait_for(
+            executor_ids,
+            lambda ids: len(ids) == 2 and victim_id not in ids,
+        )
+        assert replacement_ids - initial_ids
+    finally:
+        if spark is not None:
+            raydp.stop_spark()
+        ray.shutdown()
+        cluster.shutdown()
 
 
 @pytest.mark.skip("flaky")
