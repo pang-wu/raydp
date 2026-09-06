@@ -151,6 +151,50 @@ ADRs record **why** a decision was made, and they come **before** the plan that 
 - Write an ADR when a decision constrains future work: a Spark or Ray contract RayDP now depends on, an executor-lifecycle model, a compatibility boundary, a deliberate divergence from upstream. Skip it for routine fixes that follow an existing decision.
 - **Do not point code comments at ADRs.** ADRs are immutable records; a comment referencing "see ADR-0003 §Alternatives" rots silently when the decision is superseded. State the contract in the comment itself.
 
+## Releases
+
+Releases are cut by hand. Nothing below is automated beyond the two publish workflows, so the sequence matters.
+
+### Branch layout
+
+`master` is the development line. Each minor version gets a long-lived release branch, and **the release branch determines which Spark versions that release supports** — `master` tracks the newest Spark line while release branches stay on older ones.
+
+| Branch | RayDP version | PySpark requirement | Shim modules |
+| ------ | ------------- | ------------------- | ------------ |
+| `master` | `1.7.0.dev0` | `>= 4.0.0, <= 4.1.1` | `common`, `spark322`, `spark330`, `spark340`, `spark350`, `spark400`, `spark410` |
+| `branch-1.6` | `1.6.5` | `>= 3.1.1, <= 3.5.7` | `common`, `spark322`, `spark330`, `spark340`, `spark350` |
+
+Older `branch-*` lines exist but are historical. Note that `master` still builds the 3.x shim modules; it is the `pyspark` requirement in `python/setup.py`, not the shim list, that decides what pip will install.
+
+Version numbers live in two places with different conventions. `master` computes the version in `python/setup.py` from `BASE_VERSION` plus a `.dev0` (or nightly) suffix, driven by `RAYDP_BUILD_MODE` and `RAYDP_PACKAGE_NAME`. A release branch replaces that logic with a literal `VERSION = "x.y.z"`. Do not port the release branch's literal back to `master`.
+
+### Cherry-picking to a release branch
+
+Work lands on `master` first, as a squash-merged PR — which is why history reads `Title (#NNN)`. It is then cherry-picked onto the active release branch:
+
+```bash
+git checkout branch-1.6
+git cherry-pick <master-commit>
+```
+
+- **Plain `git cherry-pick`, not `-x`.** Existing release-branch commits carry no `(cherry picked from commit ...)` trailer; provenance is matched by the identical `Title (#NNN)` subject. Follow the convention so history stays uniform, and expect to identify a backport by subject line rather than SHA.
+- **Never commit a fix directly to a release branch.** The only commits unique to a release branch are `Prepare for X.Y.Z release`. Everything else must exist on `master` first, or the next release silently regresses it.
+- Skip anything whose Spark support does not apply to that branch — a fix touching `spark400`/`spark410` has no meaning on `branch-1.6`.
+
+### Cutting the release
+
+1. Cherry-pick everything intended for the release, then verify the branch: `./build.sh` and `pytest python/raydp/tests/`.
+2. Commit the version bump as a single `Prepare for X.Y.Z release` commit. It touches every Maven version string — `core/pom.xml`, `core/agent/pom.xml`, `core/raydp-main/pom.xml`, `core/shims/pom.xml`, `core/shims/common/pom.xml` and every `core/shims/spark*/pom.xml` — plus `VERSION` in `python/setup.py` and `__version__` in `python/raydp/__init__.py`. Missing one leaves a wheel whose jars disagree with its metadata. **Bump these deliberately rather than with a global search-replace of the old version string:** the 1.6.4 and 1.6.5 commits each rewrote an unrelated `astunparse 1.6.x` line inside stored notebook output in `tutorials/raytrain_example.ipynb`, which is the tell that the shortcut was used. Nothing in `tutorials/` needs a version bump.
+3. Tag that exact commit `vX.Y.Z`. Tags are lightweight, not annotated, and every published tag points at its `Prepare for` commit.
+4. Run the **RayDP PyPI Release** workflow (`.github/workflows/pypi_release.yml`) manually, passing the tag. It checks out the tag, builds with `GITHUB_CI=1 ./build.sh` so `mvn verify` runs the JVM tests, installs the wheel, lints, runs the pytest suite and the `examples/` scripts, then publishes with `secrets.PYPI_API_TOKEN`. It is guarded by `github.repository_owner == 'ray-project'`, so it cannot publish from a fork.
+5. Publish a GitHub Release on the tag. Every existing tag has one, using GitHub's generated `## What's Changed` list plus a line thanking outside contributors.
+
+To open a new minor line, branch from `master` at the release point and bump `BASE_VERSION` on `master` to the next minor — `branch-1.6` was cut this way, followed by `bump to 1.7.0 (#374)` on `master`.
+
+### Nightlies
+
+`.github/workflows/pypi.yml` runs on a daily cron and on demand. It builds with `RAYDP_BUILD_MODE=nightly`, producing `<BASE_VERSION>bYYYYMMDD.dev0`, and publishes to PyPI as a pre-release — that is what `pip install --pre raydp` resolves. It needs no tag and no release branch. The legacy `raydp-nightly` package name is no longer updated.
+
 ## Commits and PRs
 
 - Report bugs and request features through GitHub issues.
